@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 # Anmixiu
 
 Anmixiu is an experimental cross-platform native GUI runtime written in Rust. Its portable core
@@ -10,6 +7,17 @@ and Metal; those are implementation details of the first backend, not the produc
 long-term platform vision includes Windows, Linux, FreeBSD, iOS, and Android, with native
 windowing, input, text, and rendering adapters behind the same platform-neutral contracts. It does
 not use a WebView, winit, GPUI, JSX, or RSX.
+
+> [!CAUTION]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
+## Development status
+
+> [!WARNING]
+> Anmixiu is evolving rapidly and should be considered experimental. The public API, internal
+> architecture, and platform contracts may change in backwards-incompatible ways before the
+> project reaches a stable release. Pin a specific version or commit for reproducible builds, and
+> expect to update application code when upgrading.
 
 ## Cross-platform platform vision
 
@@ -120,3 +128,7 @@ scroll buttons, and a small set of default element/control samples. Its [README]
 explains how to serve the directory and where to add future comparisons.
 
 See [docs/architecture.md](docs/architecture.md) for crate boundaries and runtime invariants.
+
+## License
+
+Anmixiu is distributed under the [MIT License](LICENSE).
