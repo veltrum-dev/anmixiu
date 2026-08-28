@@ -1,0 +1,61 @@
+[package]
+name = "anmixiu-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+devtools = ["anmixiu-core/devtools"]
+
+[dependencies]
+anmixiu-core.workspace = true
+anmixiu-layout-taffy.workspace = true
+anmixiu-reactive.workspace = true
+anmixiu-render-metal.workspace = true
+anmixiu-runtime.workspace = true
+anmixiu-scene.workspace = true
+anmixiu-text-coretext.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSColor",
+    "NSCursor",
+    "NSEvent",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSTrackingArea",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+    "objc2-quartz-core",
+] }
+objc2-foundation = { workspace = true, features = [
+    "NSArray",
+    "NSDate",
+    "NSGeometry",
+    "NSObjCRuntime",
+    "NSRunLoop",
+    "NSString",
+    "NSThread",
+] }
+objc2-quartz-core = { workspace = true, features = ["CADisplayLink"] }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "frame_builder"
+harness = false
+
+[lints]
+workspace = true

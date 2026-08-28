@@ -1,0 +1,36 @@
+[package]
+name = "anmixiu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+devtools = [
+    "anmixiu-core/devtools",
+    "anmixiu-platform-macos/devtools",
+]
+tailwind = ["anmixiu-core/tailwind"]
+
+[dependencies]
+anmixiu-core.workspace = true
+anmixiu-reactive.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anmixiu-platform-macos.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "counter"
+path = "../../examples/counter.rs"
+
+[[example]]
+name = "scroll"
+path = "../../examples/scroll.rs"
+
+[lints]
+workspace = true

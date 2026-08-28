@@ -1,0 +1,35 @@
+[package]
+name = "anmixiu-render-metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anmixiu-scene.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics.workspace = true
+metal.workspace = true
+objc2.workspace = true
+
+[dev-dependencies]
+anmixiu-text-coretext.workspace = true
+criterion.workspace = true
+stats_alloc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-graphics.workspace = true
+metal.workspace = true
+
+[[bench]]
+name = "metal_submit"
+harness = false
+
+[[bench]]
+name = "allocation"
+harness = false
+
+[lints]
+workspace = true

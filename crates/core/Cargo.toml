@@ -1,0 +1,37 @@
+[package]
+name = "anmixiu-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+devtools = []
+tailwind = []
+
+[dependencies]
+anmixiu-reactive.workspace = true
+anmixiu-runtime.workspace = true
+anmixiu-scene.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+stats_alloc.workspace = true
+
+[[bench]]
+name = "frame_scheduler"
+harness = false
+
+[[bench]]
+name = "shared_string"
+harness = false
+
+[[bench]]
+name = "allocation"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "anmixiu-text-coretext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anmixiu-scene.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+core-graphics.workspace = true
+core-text.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+stats_alloc.workspace = true
+
+[[bench]]
+name = "text"
+harness = false
+
+[[bench]]
+name = "allocation"
+harness = false
+
+[lints]
+workspace = true

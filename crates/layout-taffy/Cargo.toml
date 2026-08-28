@@ -1,0 +1,22 @@
+[package]
+name = "anmixiu-layout-taffy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anmixiu-core.workspace = true
+anmixiu-scene.workspace = true
+taffy = { workspace = true, features = ["taffy_tree"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "layout"
+harness = false
+
+[lints]
+workspace = true

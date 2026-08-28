@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Native HTML reference · Anmixiu</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.45;
+      }
+
+      body {
+        margin: 0;
+        background: Canvas;
+        color: CanvasText;
+      }
+
+      main {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 28px 0 56px;
+      }
+
+      section {
+        margin: 24px 0;
+        padding: 20px;
+        border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+        border-radius: 12px;
+      }
+
+      h1,
+      h2 {
+        margin-top: 0;
+      }
+
+      .scroll-frame {
+        width: 100%;
+        height: 280px;
+        overflow: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable both-edges;
+        border: 1px solid color-mix(in srgb, CanvasText 35%, transparent);
+        border-radius: 8px;
+      }
+
+      .scroll-frame.vertical {
+        max-width: 520px;
+      }
+
+      .vertical-content {
+        padding: 12px;
+      }
+
+      .row {
+        padding: 8px 10px;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+        white-space: nowrap;
+      }
+
+      .wide-content {
+        min-width: 1280px;
+        padding: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        white-space: nowrap;
+      }
+
+      th,
+      td {
+        padding: 9px 12px;
+        text-align: left;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        background: Canvas;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin: 12px 0;
+      }
+
+      code {
+        padding: 2px 5px;
+        border-radius: 4px;
+        background: color-mix(in srgb, CanvasText 12%, transparent);
+      }
+
+      .control-baseline {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 5px;
+      }
+
+      progress {
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Native HTML behavior reference</h1>
+      <p>
+        This page is intentionally ordinary browser HTML. Use the wheel, trackpad, Shift+wheel,
+        scrollbar thumb, keyboard arrows, Page Up/Down, Home/End, and the buttons below to compare
+        native X/Y scrolling.
+      </p>
+
+      <section>
+        <h2>Vertical overflow</h2>
+        <p>The viewport is bounded; the content is taller than it.</p>
+        <div class="scroll-frame vertical" id="vertical-scroll" tabindex="0" aria-label="Vertical native scroll">
+          <div class="vertical-content" id="vertical-content"></div>
+        </div>
+        <div class="controls">
+          <button type="button" data-target="vertical-scroll" data-axis="y" data-amount="240">
+            Smooth down 240px
+          </button>
+          <button type="button" data-target="vertical-scroll" data-axis="y" data-amount="-240">
+            Smooth up 240px
+          </button>
+          <output id="vertical-position" aria-live="polite">scrollTop: 0</output>
+        </div>
+      </section>
+
+      <section>
+        <h2>Horizontal + vertical overflow</h2>
+        <p>
+          The table is wider and taller than the viewport. On a trackpad, horizontal gestures move
+          <code>scrollLeft</code>; Shift+wheel is also useful for comparing browser fallback behavior.
+        </p>
+        <div class="scroll-frame" id="xy-scroll" tabindex="0" aria-label="Horizontal and vertical native scroll">
+          <div class="wide-content">
+            <table>
+              <thead>
+                <tr>
+                  <th>Row</th>
+                  <th>Service / field</th>
+                  <th>Long horizontal value</th>
+                  <th>Status</th>
+                  <th>Latency</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="table-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="controls">
+          <button type="button" data-target="xy-scroll" data-axis="x" data-amount="320">
+            Smooth right 320px
+          </button>
+          <button type="button" data-target="xy-scroll" data-axis="x" data-amount="-320">
+            Smooth left 320px
+          </button>
+          <button type="button" data-target="xy-scroll" data-axis="y" data-amount="320">
+            Smooth down 320px
+          </button>
+          <button type="button" data-target="xy-scroll" data-axis="y" data-amount="-320">
+            Smooth up 320px
+          </button>
+          <output id="xy-position" aria-live="polite">scrollLeft: 0 · scrollTop: 0</output>
+        </div>
+      </section>
+
+      <section>
+        <h2>Default element baseline</h2>
+        <div class="control-baseline">
+          <div>
+            <h3>Text and structure</h3>
+            <p>Paragraph, <a href="#default-element-baseline">link</a>, and <strong>strong</strong>.</p>
+            <ul>
+              <li>Unordered list item</li>
+              <li>Another item</li>
+            </ul>
+            <pre><code>div { overflow: auto; }</code></pre>
+          </div>
+          <div>
+            <h3>Controls</h3>
+            <label>Text input <input type="text" placeholder="Native input" /></label>
+            <label>Choice <select><option>First option</option><option>Second option</option></select></label>
+            <label>Range <input type="range" min="0" max="100" value="42" /></label>
+            <label>Progress <progress value="42" max="100">42%</progress></label>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const verticalContent = document.querySelector("#vertical-content");
+      for (let index = 1; index <= 120; index += 1) {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.textContent = `Vertical row ${String(index).padStart(3, "0")} · native overflow content`;
+        verticalContent.append(row);
+      }
+
+      const tableBody = document.querySelector("#table-body");
+      for (let index = 1; index <= 120; index += 1) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${String(index).padStart(3, "0")}</td>
+          <td>batch-${String(index).padStart(3, "0")}</td>
+          <td>Wide field value that stays on one line so scrollLeft is observable · shard-${index % 12}</td>
+          <td>${index % 3 === 0 ? "Running" : "Complete"}</td>
+          <td>${8 + (index * 7) % 43} ms</td>
+          <td>2026-08-${String(1 + index % 28).padStart(2, "0")}</td>
+        `;
+        tableBody.append(row);
+      }
+
+      const updatePosition = (element) => {
+        const output = document.querySelector(`#${element.id}-position`);
+        if (!output) return;
+        if (element.id === "xy-scroll") {
+          output.value = `scrollLeft: ${Math.round(element.scrollLeft)} · scrollTop: ${Math.round(element.scrollTop)}`;
+          output.textContent = output.value;
+        } else {
+          output.value = `scrollTop: ${Math.round(element.scrollTop)}`;
+          output.textContent = output.value;
+        }
+      };
+
+      document.querySelectorAll(".scroll-frame").forEach((element) => {
+        element.addEventListener("scroll", () => updatePosition(element), { passive: true });
+        updatePosition(element);
+      });
+
+      document.querySelectorAll("[data-target]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const target = document.getElementById(button.dataset.target);
+          const amount = Number(button.dataset.amount);
+          const options = { behavior: "smooth", left: 0, top: 0 };
+          if (button.dataset.axis === "x") options.left = amount;
+          else options.top = amount;
+          target.scrollBy(options);
+        });
+      });
+    </script>
+  </body>
+</html>
