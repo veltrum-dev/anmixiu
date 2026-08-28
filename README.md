@@ -8,12 +8,9 @@ long-term platform vision includes Windows, Linux, FreeBSD, iOS, and Android, wi
 windowing, input, text, and rendering adapters behind the same platform-neutral contracts. It does
 not use a WebView, winit, GPUI, JSX, or RSX.
 
-> [!CAUTION]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 ## Development status
 
-> [!WARNING]
+> [!CAUTION]
 > Anmixiu is evolving rapidly and should be considered experimental. The public API, internal
 > architecture, and platform contracts may change in backwards-incompatible ways before the
 > project reaches a stable release. Pin a specific version or commit for reproducible builds, and
