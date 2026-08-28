@@ -3,7 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("the Anmixiu MVP currently requires macOS")]
+    #[error(
+        "the current Anmixiu macOS backend is unavailable on this target; additional platform backends are planned"
+    )]
     UnsupportedPlatform,
 }
 

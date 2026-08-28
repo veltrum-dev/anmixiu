@@ -290,7 +290,12 @@ impl OwnerRegistry {
     /// Takes and clears the owners that requested an animation frame this turn.
     #[must_use]
     pub fn take_animating(&self) -> Vec<OwnerId> {
-        self.inner.animating.borrow_mut().drain().map(|(owner, _)| owner).collect()
+        self.inner
+            .animating
+            .borrow_mut()
+            .drain()
+            .map(|(owner, _)| owner)
+            .collect()
     }
 
     /// Takes and clears the animating owners together with the source location of each one's most

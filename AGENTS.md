@@ -27,7 +27,7 @@ with `.rules`.
 - `anmixiu-runtime` depends on reactive owner contracts; `anmixiu-core` depends on reactive, scene, and runtime contracts; `anmixiu-layout-taffy` adapts core styles; platform renderers consume scene commands.
 - `anmixiu-platform-macos` owns AppKit input/window assembly and may depend on core, layout, runtime, Metal, and CoreText implementations. Core crates never depend back on platform implementations.
 - Third-party versions and internal paths belong in root `[workspace.dependencies]`; member crates inherit them. OS implementations use target-specific dependencies, never OS-selection features.
-- Do not add empty Windows/Linux/FreeBSD crates. Future direction only: Windows uses Win32 + D3D11 + DirectWrite; Linux/FreeBSD compile Wayland and X11 together with runtime selection, preferring Vulkan and falling back to GL.
+- Do not add empty Windows/Linux/FreeBSD crates. Future desktop direction: Windows uses Win32 + D3D11 + DirectWrite; Linux/FreeBSD compile Wayland and X11 together with runtime selection, preferring Vulkan and falling back to GL. The longer-term mobile direction includes native iOS and Android backends that reuse the platform-neutral contracts; add those crates only with a real implementation.
 
 ## Test-driven development
 
@@ -65,5 +65,5 @@ with `.rules`.
 - `unsafe`/FFI is allowed only in `platform-macos`, `render-metal`, and `text-coretext`; every unsafe block or impl must have an adjacent `// SAFETY:` explanation. Core, reactive, scene, layout, runtime, facade, and examples forbid unsafe.
 - Prefer structured errors for recoverable failures. Keep responsibilities narrow and compose concrete types before inventing traits or compatibility layers.
 - Keep source files responsibility-focused. A module with submodules uses `module.rs` plus a sibling `module/` directory (for example `element.rs` with `element/style.rs` and `element/div.rs`); do not use `mod.rs`. Split by stable responsibility, not arbitrary line counts.
-- Out of MVP scope: non-macOS backends, web, async lifecycle/render, blur, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown.
+- Out of MVP scope: non-macOS backends, web, async lifecycle/render, blur, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown. This is an MVP boundary rather than the product boundary; the longer-term roadmap includes Windows/Linux/FreeBSD plus native iOS and Android backends.
 - Preserve user changes. Work directly on `main`; do not create worktrees, branches, or commits unless the user explicitly asks later.

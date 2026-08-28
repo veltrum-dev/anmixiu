@@ -528,7 +528,10 @@ fn advance_scroll_steps_every_animating_region_in_one_frame() {
     assert!(frame.advance_scroll(1.0 / 60.0));
     // The bug: only `top` would move; `bottom` would still be at 0.
     assert!(top.offset_y() > 0.0, "first region advanced");
-    assert!(bottom.offset_y() > 0.0, "second region advanced in the same frame");
+    assert!(
+        bottom.offset_y() > 0.0,
+        "second region advanced in the same frame"
+    );
 }
 
 #[test]

@@ -2,12 +2,15 @@
 
 ## Dependency direction
 
-`anmixiu` is the thin public facade. `anmixiu-core` owns elements, components, public `Style`,
-events, state lookup, lifecycle, and scheduling contracts. `anmixiu-reactive` and
-`anmixiu-scene` are platform-neutral leaves. `anmixiu-runtime` adds Tokio and owner-bound local UI
-future scheduling. `anmixiu-layout-taffy` is an internal adapter from a projection of core styles
-to Taffy Flexbox. `anmixiu-render-metal` and `anmixiu-text-coretext` consume platform-neutral scene
-and geometry data. `anmixiu-platform-macos` assembles those contracts with AppKit.
+`anmixiu` is the thin public facade for a cross-platform native UI model. `anmixiu-core` owns
+elements, components, public `Style`, events, state lookup, lifecycle, and scheduling contracts.
+`anmixiu-reactive` and `anmixiu-scene` are platform-neutral leaves. `anmixiu-runtime` adds Tokio
+and owner-bound local UI future scheduling. `anmixiu-layout-taffy` is an internal adapter from a
+projection of core styles to Taffy Flexbox. `anmixiu-render-metal` and `anmixiu-text-coretext`
+consume platform-neutral scene and geometry data. The current `anmixiu-platform-macos` crate
+assembles those contracts with AppKit; it is the first backend, not a requirement of the shared
+API. Future desktop and mobile backends (including iOS and Android) will plug into the same
+contracts with target-specific windowing, input, text, and rendering implementations.
 
 Dependencies always point from platform implementations toward contracts. Core crates never know
 about AppKit, Metal, CoreText, or a concrete event loop. Taffy types are not part of the public
@@ -96,11 +99,12 @@ registry.
 ## Async boundary
 
 Each application owns one Tokio multithread runtime for timers and I/O readiness. UI futures use a
-bounded `async-task` queue and are polled only by the AppKit main thread. `Context::spawn` binds a
-future to the current persistent component owner, so callers do not retain or detach a task handle.
-The Tokio runtime uses two workers: enough to remain multithreaded when one I/O task is delayed,
-without scaling idle UI thread count to every logical CPU. Lifecycle methods and render remain
-synchronous.
+bounded `async-task` queue and are polled by the active platform's UI thread. In the current macOS
+backend that thread is AppKit's main thread; other backends will provide the equivalent native UI
+executor without changing the owner contract. `Context::spawn` binds a future to the current
+persistent component owner, so callers do not retain or detach a task handle. The Tokio runtime
+uses two workers: enough to remain multithreaded when one I/O task is delayed, without scaling idle
+UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
 
 ## Cache contracts
 
@@ -112,7 +116,7 @@ synchronous.
 - Metal resources: bounded pipelines, atlas textures, and staging buffers; drawable absence is a
   recoverable skipped frame and never a retry loop.
 
-## Cross-display scale and refresh
+## Display scale and refresh (current macOS backend)
 
 macOS frame requests are coalesced onto the `NSView` display link rather than drawn immediately by
 the main dispatch queue. The link follows the window's current display, so the built-in 120 Hz
@@ -147,8 +151,12 @@ backend extracts a renderer-independent A8 mask. Glyph UVs/quads retain a transp
 two-pixel safety border so low-DPI coverage is not cropped. Scale and final positioned origin are
 part of the bounded text/atlas cache contracts.
 
-## Future platforms
+## Cross-platform roadmap
 
-There are deliberately no placeholder crates or public APIs for other operating systems. The
-planned Windows backend is Win32 + D3D11 + DirectWrite. Linux and FreeBSD will compile Wayland and
-X11 support together and select at runtime, preferring Vulkan with GL fallback.
+There are deliberately no placeholder crates or public APIs for platforms that are not implemented
+yet. The MVP currently ships the macOS backend described above. Planned desktop backends include
+Windows (Win32 + D3D11 + DirectWrite) and Linux/FreeBSD (Wayland and X11 compiled together with
+runtime selection, preferring Vulkan with a GL fallback). The longer-term mobile roadmap includes
+native iOS and Android integrations. Those backends should reuse the platform-neutral
+`anmixiu-core`, `anmixiu-reactive`, `anmixiu-scene`, and `anmixiu-runtime` contracts while mapping
+window/lifecycle, input, text, and rendering work to each platform's native APIs.

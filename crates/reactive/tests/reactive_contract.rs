@@ -168,7 +168,11 @@ fn animation_requests_mark_dirty_and_are_taken_per_turn() {
     // Taking the animation set consumes it; the dirty queue is independent.
     assert_eq!(owners.take_animating(), vec![owner]);
     assert_eq!(owners.animating_len(), 0);
-    assert_eq!(owners.dirty_len(), 1, "take_animating leaves the dirty mark");
+    assert_eq!(
+        owners.dirty_len(),
+        1,
+        "take_animating leaves the dirty mark"
+    );
     assert_eq!(owners.take_dirty(), vec![owner]);
 }
 

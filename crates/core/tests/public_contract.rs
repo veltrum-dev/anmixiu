@@ -414,24 +414,28 @@ fn hit_testing_uses_half_open_bounds_matching_the_scene() {
     };
     // Inside and on the top-left edge: hit.
     assert_eq!(
-        tree.hit_test(10.0, 20.0, bounds).and_then(|n| n.text_content()),
+        tree.hit_test(10.0, 20.0, bounds)
+            .and_then(|n| n.text_content()),
         Some("target"),
         "top-left corner"
     );
     assert_eq!(
-        tree.hit_test(49.999, 49.999, bounds).and_then(|n| n.text_content()),
+        tree.hit_test(49.999, 49.999, bounds)
+            .and_then(|n| n.text_content()),
         Some("target"),
         "just inside"
     );
     // Exactly on the right/bottom edge belongs to the next pixel, not this element — the
     // rendered scene (`Rect::contains`) treats it the same way.
     assert_ne!(
-        tree.hit_test(50.0, 35.0, bounds).and_then(|n| n.text_content()),
+        tree.hit_test(50.0, 35.0, bounds)
+            .and_then(|n| n.text_content()),
         Some("target"),
         "right edge is exclusive"
     );
     assert_ne!(
-        tree.hit_test(30.0, 50.0, bounds).and_then(|n| n.text_content()),
+        tree.hit_test(30.0, 50.0, bounds)
+            .and_then(|n| n.text_content()),
         Some("target"),
         "bottom edge is exclusive"
     );

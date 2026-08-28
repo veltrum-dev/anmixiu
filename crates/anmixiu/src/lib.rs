@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! Native Rust UI primitives for macOS.
+//! Cross-platform native Rust UI primitives.
+//!
+//! The elements, layout, state, and scheduling contracts are platform-neutral. The repository's
+//! first complete `App`/`Window` integration is the macOS backend; future desktop and mobile
+//! adapters, including iOS and Android, are intended to reuse this same public UI model.
 //!
 //! ```
 //! use anmixiu::prelude::*;
@@ -24,8 +28,8 @@ pub mod prelude {
     pub use crate::{
         AlignItems, App, ButtonElement, Color, Context, CursorStyle, DivElement, Element,
         ElementId, FlexDirection, FluentBuilder, GlobalElementId, InteractiveElement, IntoElement,
-        JustifyContent, ParentElement, Pixels, Render, RenderOnce, ScrollHandle, SharedString, Signal,
-        State, Stateful, StatefulInteractiveElement, Style, StyleRefinement, Styled, TextElement,
-        Typography, Window, button, div, px, shared_format, text,
+        JustifyContent, ParentElement, Pixels, Render, RenderOnce, ScrollHandle, SharedString,
+        Signal, State, Stateful, StatefulInteractiveElement, Style, StyleRefinement, Styled,
+        TextElement, Typography, Window, button, div, px, shared_format, text,
     };
 }

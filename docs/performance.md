@@ -3,6 +3,10 @@
 The engineering reference budget is 8.33 ms for a 120 Hz display and 16.67 ms from ordinary input
 to its next visible frame. These are environment-dependent targets, not API guarantees.
 
+The measurements below describe the current macOS MVP backend and its Apple Silicon test
+environment. They are a backend baseline, not a claim that Anmixiu is macOS-only; cross-platform
+benchmarks will be added as the Windows, Linux/FreeBSD, iOS, and Android backends land.
+
 The release Counter baseline with two Tokio workers measured about 31 MB physical footprint at
 idle on the reference M1 Pro host. Repeated live resize raised the footprint because Retina
 `CAMetalLayer` IOSurfaces grew from roughly 10 MB to 33 MB; Rust `MALLOC_SMALL` remained near
