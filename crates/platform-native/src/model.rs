@@ -105,7 +105,7 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    /// Creates a logical viewport and Retina scale.
+    /// Creates a logical viewport and native display scale.
     ///
     /// # Panics
     ///

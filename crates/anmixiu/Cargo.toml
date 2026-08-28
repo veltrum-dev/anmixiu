@@ -10,6 +10,7 @@ default = []
 devtools = [
     "anmixiu-core/devtools",
     "anmixiu-platform-macos/devtools",
+    "anmixiu-platform-windows/devtools",
 ]
 tailwind = ["anmixiu-core/tailwind"]
 
@@ -19,6 +20,9 @@ anmixiu-reactive.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 anmixiu-platform-macos.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+anmixiu-platform-windows.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

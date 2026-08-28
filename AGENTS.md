@@ -25,9 +25,9 @@ with `.rules`.
 - `anmixiu` is a thin facade.
 - Platform-neutral leaves: `anmixiu-reactive`, `anmixiu-scene`.
 - `anmixiu-runtime` depends on reactive owner contracts; `anmixiu-core` depends on reactive, scene, and runtime contracts; `anmixiu-layout-taffy` adapts core styles; platform renderers consume scene commands.
-- `anmixiu-platform-macos` owns AppKit input/window assembly and may depend on core, layout, runtime, Metal, and CoreText implementations. Core crates never depend back on platform implementations.
+- `anmixiu-platform-native` owns the shared element-to-layout/scene projection and portable input/display models. `anmixiu-platform-macos` assembles AppKit + Metal + CoreText; `anmixiu-platform-windows` assembles Win32 + D3D11 + DirectWrite. Core crates never depend back on platform implementations.
 - Third-party versions and internal paths belong in root `[workspace.dependencies]`; member crates inherit them. OS implementations use target-specific dependencies, never OS-selection features.
-- Do not add empty Windows/Linux/FreeBSD crates. Future desktop direction: Windows uses Win32 + D3D11 + DirectWrite; Linux/FreeBSD compile Wayland and X11 together with runtime selection, preferring Vulkan and falling back to GL. The longer-term mobile direction includes native iOS and Android backends that reuse the platform-neutral contracts; add those crates only with a real implementation.
+- Do not add empty Linux/FreeBSD/iOS/Android crates. Future desktop direction: Linux/FreeBSD compile Wayland and X11 together with runtime selection, preferring Vulkan and falling back to GL. The longer-term mobile direction includes native iOS and Android backends that reuse the platform-neutral contracts; add those crates only with a real implementation.
 
 ## Test-driven development
 
@@ -45,7 +45,7 @@ with `.rules`.
 ## Runtime and performance
 
 - Signal reads subscribe only inside an explicit render observer. Writes mutate and mark owners dirty; rendering is frame-batched and deduplicated. Unmount removes subscriptions and cancels owner tasks.
-- Each app owns one minimal-feature Tokio multithread runtime. UI futures are local, resume only on the AppKit main thread, and are owner-bound. Do not make lifecycle or render async.
+- Each app owns one minimal-feature Tokio multithread runtime. UI futures are local, resume only on the native UI thread, and are owner-bound. Do not make lifecycle or render async.
 - Render, layout, paint, and input hot paths contain no blocking I/O, parsing, ordinary business-field mutation, or unbounded task/observer/history creation.
 - Every cache documents its key, invalidation rule, and hard capacity. Warm steady-state memory must not grow continuously. Algorithmic performance changes need before/after benchmark evidence.
 - Frame reference targets are 8.33 ms at 120 Hz and 16.67 ms interaction-to-next-frame; they are engineering targets, not correctness promises.
@@ -62,8 +62,8 @@ with `.rules`.
 
 ## Safety and scope
 
-- `unsafe`/FFI is allowed only in `platform-macos`, `render-metal`, and `text-coretext`; every unsafe block or impl must have an adjacent `// SAFETY:` explanation. Core, reactive, scene, layout, runtime, facade, and examples forbid unsafe.
+- `unsafe`/FFI is allowed only in `platform-macos`, `render-metal`, `text-coretext`, `platform-windows`, `render-d3d11`, and `text-directwrite`; every unsafe block or impl must have an adjacent `// SAFETY:` explanation. Core, reactive, scene, layout, runtime, shared platform projection, facade, and examples forbid unsafe.
 - Prefer structured errors for recoverable failures. Keep responsibilities narrow and compose concrete types before inventing traits or compatibility layers.
 - Keep source files responsibility-focused. A module with submodules uses `module.rs` plus a sibling `module/` directory (for example `element.rs` with `element/style.rs` and `element/div.rs`); do not use `mod.rs`. Split by stable responsibility, not arbitrary line counts.
-- Out of MVP scope: non-macOS backends, web, async lifecycle/render, blur, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown. This is an MVP boundary rather than the product boundary; the longer-term roadmap includes Windows/Linux/FreeBSD plus native iOS and Android backends.
+- Out of current MVP scope: backends other than macOS and Windows, web, async lifecycle/render, blur, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown. This is an MVP boundary rather than the product boundary; the longer-term roadmap includes Linux/FreeBSD plus native iOS and Android backends.
 - Preserve user changes. Work directly on `main`; do not create worktrees, branches, or commits unless the user explicitly asks later.

@@ -91,8 +91,7 @@ fn main() -> Result<(), anmixiu::AppError> {
         .window(
             Window::new()
                 .title("Anmixiu Smooth Scroll")
-                .size(960.0, 720.0)
-                .font_size(px(16.0)),
+                .size(960.0, 720.0),
         )
         .run(ScrollDemo::default())
 }

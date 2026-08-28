@@ -12,6 +12,7 @@ devtools = ["anmixiu-core/devtools"]
 [dependencies]
 anmixiu-core.workspace = true
 anmixiu-layout-taffy.workspace = true
+anmixiu-platform-native.workspace = true
 anmixiu-reactive.workspace = true
 anmixiu-render-metal.workspace = true
 anmixiu-runtime.workspace = true

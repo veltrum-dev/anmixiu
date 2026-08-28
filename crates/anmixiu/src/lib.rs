@@ -3,8 +3,8 @@
 //! Cross-platform native Rust UI primitives.
 //!
 //! The elements, layout, state, and scheduling contracts are platform-neutral. The repository's
-//! first complete `App`/`Window` integration is the macOS backend; future desktop and mobile
-//! adapters, including iOS and Android, are intended to reuse this same public UI model.
+//! complete `App`/`Window` integrations currently target macOS and Windows. Future desktop and
+//! mobile adapters, including iOS and Android, are intended to reuse this same public UI model.
 //!
 //! ```
 //! use anmixiu::prelude::*;
@@ -23,6 +23,8 @@ pub use anmixiu_reactive::Signal;
 
 #[cfg(target_os = "macos")]
 pub use anmixiu_platform_macos::{App, AppError, Window};
+#[cfg(target_os = "windows")]
+pub use anmixiu_platform_windows::{App, AppError, Window};
 
 pub mod prelude {
     pub use crate::{

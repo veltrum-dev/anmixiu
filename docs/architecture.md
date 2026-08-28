@@ -2,19 +2,26 @@
 
 ## Dependency direction
 
-`anmixiu` is the thin public facade for a cross-platform native UI model. `anmixiu-core` owns
-elements, components, public `Style`, events, state lookup, lifecycle, and scheduling contracts.
-`anmixiu-reactive` and `anmixiu-scene` are platform-neutral leaves. `anmixiu-runtime` adds Tokio
-and owner-bound local UI future scheduling. `anmixiu-layout-taffy` is an internal adapter from a
-projection of core styles to Taffy Flexbox. `anmixiu-render-metal` and `anmixiu-text-coretext`
-consume platform-neutral scene and geometry data. The current `anmixiu-platform-macos` crate
-assembles those contracts with AppKit; it is the first backend, not a requirement of the shared
-API. Future desktop and mobile backends (including iOS and Android) will plug into the same
-contracts with target-specific windowing, input, text, and rendering implementations.
+`anmixiu` is the thin public facade. `anmixiu-core` owns elements, components, public `Style`,
+events, state lookup, lifecycle, and scheduling contracts. `anmixiu-reactive` and
+`anmixiu-scene` are platform-neutral leaves. `anmixiu-runtime` adds Tokio and owner-bound local UI
+future scheduling. `anmixiu-layout-taffy` is an internal adapter from a projection of core styles
+to Taffy Flexbox. `anmixiu-platform-native` owns the shared element-to-layout/scene projection and
+portable input/display models, selecting the native text implementation at compile time.
+`anmixiu-render-metal`/`anmixiu-text-coretext` and
+`anmixiu-render-d3d11`/`anmixiu-text-directwrite` consume platform-neutral scene and geometry data.
+`anmixiu-platform-macos` assembles AppKit while `anmixiu-platform-windows` assembles Win32. Future
+desktop and mobile backends, including iOS and Android, will plug into the same contracts with
+target-specific windowing, input, text, and rendering implementations.
 
 Dependencies always point from platform implementations toward contracts. Core crates never know
-about AppKit, Metal, CoreText, or a concrete event loop. Taffy types are not part of the public
-element or style API.
+about AppKit, Win32, Metal, D3D11, CoreText, DirectWrite, or a concrete event loop. Taffy types are
+not part of the public element or style API.
+
+Native FFI remains confined to the six implementation crates: `anmixiu-platform-macos`,
+`anmixiu-render-metal`, `anmixiu-text-coretext`, `anmixiu-platform-windows`,
+`anmixiu-render-d3d11`, and `anmixiu-text-directwrite`. Every shared contract and the facade forbid
+unsafe Rust.
 
 ## Update pipeline
 
@@ -22,8 +29,8 @@ Within an explicit component render observer, reading a `Signal` records one own
 A write mutates the value and inserts each live dependent owner into a deduplicated dirty queue; it
 never renders inline. The window requests one display turn. That turn removes redundant descendants
 when an already-dirty ancestor covers them, rerenders only remaining owners, and reuses layout and
-scene cache entries whose complete revision keys still match. A clean turn submits no Metal command
-buffer, and a normal display turn submits at most one. Invalidations raised during render are moved
+scene cache entries whose complete revision keys still match. A clean turn submits no GPU work, and
+a normal display turn presents at most one scene snapshot. Invalidations raised during render are moved
 to the next turn and guarded against an infinite render loop.
 
 Unmount removes dependency edges and cancels unfinished owner-bound UI futures. Application and
@@ -52,20 +59,23 @@ capabilities. The heterogeneous `ElementNode` projection is doc-hidden and exist
 single child vector must hold different concrete element types across crate boundaries.
 
 Built-ins have minimal usable defaults rather than being aliases for a generic node. `DivElement`
-defaults to a neutral Flex column container, `TextElement` inherits foreground and uses the default
-CoreText font metrics, and `ButtonElement` supplies a visible neutral background, white label,
+defaults to a neutral Flex column container, `TextElement` inherits foreground and uses native text
+metrics, and `ButtonElement` supplies a visible neutral background, white label,
 36-pixel minimum height, padding, one-pixel border, hover refinement, an 8-pixel radius, intrinsic
 cross-axis sizing, centered label placement, pointer cursor, and a two-pixel focus ring.
 Borders are paint-only inset layers; hover refinements can change background, foreground, and
-border color without invalidating Taffy layout. `NSTrackingArea` clears hover when the pointer exits
-the view. `Styled` overrides remain authoritative; brand variants and themes belong to a future
+border color without invalidating Taffy layout. AppKit tracking areas and Win32 mouse-leave tracking
+clear hover when the pointer exits the native view. `Styled` overrides remain authoritative; brand
+variants and themes belong to a future
 component layer.
 
 Application and window typography are optional, field-wise defaults. A window font family or size
 overrides the matching application field while leaving the other field free to fall back. When
-neither level specifies a field, the platform supplies its native UI font and size; on macOS the
-unresolved size is passed as CoreText's documented `0.0` default-size sentinel and resolves to a
-visible system size. A literal zero-sized computed font is never produced by omission.
+neither level specifies a field, the platform supplies its native UI font and a visible default
+size: CoreText resolves the macOS default while Windows reads the current non-client message/UI
+font family and logical size for DirectWrite. Windows refreshes those derived values after a system
+settings change and invalidates text, layout, and scene results that embed the old metrics. A
+literal zero-sized computed font is never produced by omission.
 
 Colors support normalized floating-point `rgb`/`rgba` constructors and const integer
 `hex(0xRRGGBB)` / `hex_with_alpha(0xRRGGBBAA)` constructors. Separate functions avoid ambiguity
@@ -99,24 +109,24 @@ registry.
 ## Async boundary
 
 Each application owns one Tokio multithread runtime for timers and I/O readiness. UI futures use a
-bounded `async-task` queue and are polled by the active platform's UI thread. In the current macOS
-backend that thread is AppKit's main thread; other backends will provide the equivalent native UI
-executor without changing the owner contract. `Context::spawn` binds a future to the current
-persistent component owner, so callers do not retain or detach a task handle. The Tokio runtime
-uses two workers: enough to remain multithreaded when one I/O task is delayed, without scaling idle
-UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
+bounded `async-task` queue and are polled only by the active platform's native UI thread: AppKit's
+main thread on macOS and the HWND-owning thread on Windows. Future backends provide an equivalent
+native UI executor without changing the owner contract. `Context::spawn` binds a future to the
+current persistent component owner, so callers do not retain or detach a task handle. The Tokio
+runtime uses two workers: enough to remain multithreaded when one I/O task is delayed, without
+scaling idle UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
 
 ## Cache contracts
 
 - Layout: keyed by root identity, structure/style/measure revisions, logical viewport, and scale;
   one current entry per engine.
 - Scene: keyed by node, paint/layout revisions, and scale; bounded LRU capacity.
-- Glyph atlas: keyed by font identity, size, scale, glyph, and quantized horizontal subpixel phase;
+- Glyph atlas: keyed by font identity, size, scale, glyph, and quantized subpixel phase;
   fixed page dimensions and entry capacity, with generation changes forcing texture refresh.
-- Metal resources: bounded pipelines, atlas textures, and staging buffers; drawable absence is a
-  recoverable skipped frame and never a retry loop.
+- Renderer resources: Metal retains bounded pipelines, atlas textures, and staging buffers; D3D11
+  retains a hard-capacity LRU of Direct2D A8 atlas bitmaps keyed by atlas id and generation.
 
-## Display scale and refresh (current macOS backend)
+## Native scale and refresh
 
 macOS frame requests are coalesced onto the `NSView` display link rather than drawn immediately by
 the main dispatch queue. The link follows the window's current display, so the built-in 120 Hz
@@ -151,12 +161,31 @@ backend extracts a renderer-independent A8 mask. Glyph UVs/quads retain a transp
 two-pixel safety border so low-DPI coverage is not cropped. Scale and final positioned origin are
 part of the bounded text/atlas cache contracts.
 
-## Cross-platform roadmap
+Windows opts into Per-Monitor-V2 DPI awareness before creating its HWND. Client rectangles remain
+integer physical pixels, while `GetDpiForWindow` derives the logical viewport used by layout and
+input. `WM_DPICHANGED` applies the system-suggested outer rectangle, and every size/scale transition
+unbinds the old Direct2D target before resizing the DXGI buffers and rebuilding the exact-size
+target. Stale physical size or scale is reported as `SurfaceOutOfDate` instead of presenting a
+scene against mismatched coordinates.
 
-There are deliberately no placeholder crates or public APIs for platforms that are not implemented
-yet. The MVP currently ships the macOS backend described above. Planned desktop backends include
-Windows (Win32 + D3D11 + DirectWrite) and Linux/FreeBSD (Wayland and X11 compiled together with
-runtime selection, preferring Vulkan with a GL fallback). The longer-term mobile roadmap includes
-native iOS and Android integrations. Those backends should reuse the platform-neutral
-`anmixiu-core`, `anmixiu-reactive`, `anmixiu-scene`, and `anmixiu-runtime` contracts while mapping
-window/lifecycle, input, text, and rendering work to each platform's native APIs.
+Windows frame requests are deduplicated through private window messages and a single armed frame
+timer. UI-runtime wakes, component invalidations, hover changes, scroll animation, resize, and
+paint exposure all converge on that path. Pointer coordinates are converted from physical client
+pixels to logical pixels; button capture preserves down/up delivery, and wheel messages preserve
+signed coordinates on monitors with negative desktop origins.
+
+DirectWrite shapes complete text layouts so script fallback, bidirectional ordering, and glyph
+advances are supplied by the native engine. Per-run font-file identity, face index, simulation,
+em size, scale, glyph id, and quantized X/Y subpixel phase form the bounded atlas key. DirectWrite
+produces ClearType coverage, which the backend reduces to a renderer-independent A8 mask with a
+transparent two-pixel border. Direct2D uploads that page as `DXGI_FORMAT_A8_UNORM` with a supported
+premultiplied alpha mode and draws it only as an opacity mask.
+
+## Future platforms
+
+There are deliberately no placeholder crates or public APIs for unsupported operating systems.
+Linux and FreeBSD will compile Wayland and X11 support together and select at runtime, preferring
+Vulkan with GL fallback. The longer-term mobile roadmap includes native iOS and Android
+integrations. Those backends should reuse the platform-neutral `anmixiu-core`,
+`anmixiu-reactive`, `anmixiu-scene`, and `anmixiu-runtime` contracts while mapping window and
+lifecycle, input, text, and rendering work to each platform's native APIs.

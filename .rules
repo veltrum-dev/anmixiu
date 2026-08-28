@@ -69,15 +69,16 @@ editing. Keep rules short, concrete, and enforceable; do not turn this file into
 ## Crate, platform, and unsafe boundaries
 
 - Keep dependency direction toward contracts: platform implementations may depend on core contracts,
-  but core/reactive/scene/layout/runtime/facade crates must not depend back on AppKit, Metal, or
-  CoreText implementations.
+  but core/reactive/scene/layout/runtime/facade crates must not depend back on AppKit, Win32, Metal,
+  D3D11, CoreText, or DirectWrite implementations.
 - Put third-party versions and workspace paths in the root `[workspace.dependencies]`; inherit them
   in member crates. Use target-specific dependencies for OS code, not OS-selection features.
-- `unsafe`/FFI is limited to `platform-macos`, `render-metal`, and `text-coretext`. Every unsafe block
-  or impl needs an adjacent `// SAFETY:` explanation. Core, reactive, scene, layout, runtime, facade,
-  and examples remain safe Rust.
-- Lifecycle and render methods stay synchronous. UI futures are owner-bound and resume on the AppKit
-  main thread; do not move business logic, blocking I/O, or unbounded task/history creation into
+- `unsafe`/FFI is limited to `platform-macos`, `render-metal`, `text-coretext`, `platform-windows`,
+  `render-d3d11`, and `text-directwrite`. Every unsafe block or impl needs an adjacent `// SAFETY:`
+  explanation. Core, reactive, scene, layout, runtime, shared platform projection, facade, and
+  examples remain safe Rust.
+- Lifecycle and render methods stay synchronous. UI futures are owner-bound and resume on the native
+  UI thread; do not move business logic, blocking I/O, or unbounded task/history creation into
   render, layout, paint, or input hot paths.
 - Signal reads subscribe only inside an explicit render observer. Signal writes mark owners dirty for
   the next frame; unmount removes subscriptions and cancels unfinished owner-bound tasks.
@@ -100,7 +101,8 @@ editing. Keep rules short, concrete, and enforceable; do not turn this file into
   unsupported method that silently becomes a no-op on another platform.
 - Keep platform differences behind target-specific modules/crates and dispatch with `#[cfg]` (or an
   equivalent compile-time boundary), not runtime string checks or duplicated cross-platform APIs.
-  Shared contracts must not depend on AppKit, Win32, Metal, CoreText, or other concrete platform types.
+  Shared contracts must not depend on AppKit, Win32, Metal, D3D11, CoreText, DirectWrite, or other
+  concrete platform types.
 - For a component such as `TitleBar`, keep portable operations (`title`, `name`, and shared layout or
   interaction behavior) in the common API. If macOS supports an additional `description` field while
   Windows does not, expose `description` only in the macOS-gated API, document that restriction, and

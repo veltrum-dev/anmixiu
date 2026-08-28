@@ -1,12 +1,15 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Anmixiu
 
 Anmixiu is an experimental cross-platform native GUI runtime written in Rust. Its portable core
 uses ordinary chainable Rust values, fine-grained `Signal` dependency tracking, frame-batched
-updates, and Taffy Flexbox layout. The current MVP ships a macOS backend using AppKit, CoreText,
-and Metal; those are implementation details of the first backend, not the product boundary. The
-long-term platform vision includes Windows, Linux, FreeBSD, iOS, and Android, with native
-windowing, input, text, and rendering adapters behind the same platform-neutral contracts. It does
-not use a WebView, winit, GPUI, JSX, or RSX.
+updates, and Taffy Flexbox layout. The current MVP ships native macOS and Windows backends: macOS
+uses AppKit, CoreText, and Metal, while Windows uses Win32, DirectWrite, Direct2D, and a D3D11/DXGI
+swap chain. These are platform adapters rather than the product boundary. The longer-term platform
+vision includes Linux, FreeBSD, iOS, and Android behind the same platform-neutral contracts. It
+does not use a WebView, winit, GPUI, JSX, or RSX.
 
 ## Development status
 
@@ -20,10 +23,10 @@ not use a WebView, winit, GPUI, JSX, or RSX.
 
 Anmixiu is designed for one Rust UI model that can target desktop and mobile platforms. Shared
 elements, layout, state, scheduling, and scene contracts stay platform-neutral, while each target
-provides its own native window, input, text, and renderer integration. macOS is the first complete
-backend in this repository. Windows, Linux, and FreeBSD are planned desktop backends; iOS and
-Android are planned mobile backends that will reuse the same core contracts rather than fork the
-public UI model. Platform-specific capabilities will remain explicit and target-gated as each
+provides its own native window, input, text, and renderer integration. macOS and Windows are the
+implemented MVP backends in this repository. Linux and FreeBSD are planned desktop backends; iOS
+and Android are planned mobile backends that will reuse the same core contracts rather than fork
+the public UI model. Platform-specific capabilities will remain explicit and target-gated as each
 backend lands.
 
 ```rust
@@ -94,7 +97,7 @@ App::new()
 
 If neither level sets a field, the native platform UI font and its default visible size are used.
 
-Run the Counter with the current macOS backend:
+Run the native Counter on macOS or Windows:
 
 ```sh
 cargo run --example counter

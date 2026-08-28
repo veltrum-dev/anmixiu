@@ -78,7 +78,7 @@ impl Render for Counter {
             )
             .when_else(
                 ready,
-                |this| this.child(text("Ready · CoreText 中英文已加载")),
+                |this| this.child(text("Ready · 原生中英文字体已加载")),
                 |this| this.child(text("Loading…")),
             )
             .child(
@@ -178,8 +178,7 @@ fn main() -> Result<(), anmixiu::AppError> {
         .window(
             Window::new()
                 .title("Anmixiu Counter MVP")
-                .size(620.0, 520.0)
-                .font_size(px(18.0)),
+                .size(620.0, 520.0),
         )
         .run(Counter::default())
 }

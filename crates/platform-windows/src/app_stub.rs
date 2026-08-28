@@ -3,9 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error(
-        "the current Anmixiu macOS backend is unavailable on this target; additional platform backends are planned"
-    )]
+    #[error("the Anmixiu Windows backend requires Windows")]
     UnsupportedPlatform,
 }
 
@@ -87,7 +85,7 @@ impl App {
         self
     }
 
-    /// Reports that the `AppKit` host is unavailable on this target.
+    /// Reports that the Win32 host is unavailable on this target.
     ///
     /// # Errors
     ///

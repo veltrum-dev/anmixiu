@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use anmixiu_scene::{AtlasId, AtlasUpload, Glyph, PixelSize, Point, Rect, Size};
+use anmixiu_scene::{AtlasId, AtlasUpload, Glyph};
+#[cfg(target_os = "macos")]
+use anmixiu_scene::{PixelSize, Point, Rect, Size};
 use thiserror::Error;
 
 /// The scene atlas id reserved for CoreText alpha glyphs.
@@ -792,6 +794,11 @@ pub struct TextSystem;
 
 #[cfg(not(target_os = "macos"))]
 impl TextSystem {
+    /// Reports that CoreText is unavailable on this target.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TextError::UnsupportedPlatform`].
     pub fn new(_config: AtlasConfig) -> Result<Self, TextError> {
         Err(TextError::UnsupportedPlatform)
     }

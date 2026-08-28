@@ -1,6 +1,9 @@
+#[cfg(target_os = "macos")]
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+#[cfg(target_os = "macos")]
+use criterion::BenchmarkId;
+use criterion::{Criterion, criterion_group, criterion_main};
 
 #[cfg(target_os = "macos")]
 fn register(criterion: &mut Criterion) {

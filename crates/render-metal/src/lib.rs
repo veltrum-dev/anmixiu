@@ -798,6 +798,11 @@ pub struct MetalRenderer;
 
 #[cfg(not(target_os = "macos"))]
 impl MetalRenderer {
+    /// Reports that Metal is unavailable on this target.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`RenderError::UnsupportedPlatform`].
     pub fn new() -> Result<Option<Self>, RenderError> {
         Err(RenderError::UnsupportedPlatform)
     }

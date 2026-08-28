@@ -1,0 +1,25 @@
+[package]
+name = "anmixiu-platform-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+devtools = ["anmixiu-core/devtools"]
+
+[dependencies]
+anmixiu-core.workspace = true
+anmixiu-layout-taffy.workspace = true
+anmixiu-scene.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anmixiu-text-coretext.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+anmixiu-text-directwrite.workspace = true
+
+[lints]
+workspace = true

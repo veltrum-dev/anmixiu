@@ -1,6 +1,8 @@
 use std::alloc::System;
 
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, Stats, StatsAlloc};
+use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
+#[cfg(target_os = "macos")]
+use stats_alloc::{Region, Stats};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -42,6 +44,7 @@ fn main() {
     println!("CoreText allocation probe unavailable: non-macOS host");
 }
 
+#[cfg(target_os = "macos")]
 fn report(label: &str, iterations: usize, stats: Stats, resident_bytes: usize) {
     println!(
         "{label},{iterations},allocations={},bytes_allocated={},deallocations={},bytes_deallocated={},reallocations={},bytes_reallocated={},resident_bytes={resident_bytes}",

@@ -19,7 +19,10 @@ use anmixiu_scene::{
     AtlasUpload, Clip, Color, DrawCommand, Glyph, HitId, HitRegion, Point, Rect, Scene, SceneCache,
     SceneCacheKey, SceneCacheStats, Size,
 };
+#[cfg(target_os = "macos")]
 use anmixiu_text_coretext::{AtlasConfig, FontSpec, ShapedText, TextError, TextSystem};
+#[cfg(target_os = "windows")]
+use anmixiu_text_directwrite::{AtlasConfig, FontSpec, ShapedText, TextError, TextSystem};
 use thiserror::Error;
 
 const FRAME_SCENE_CACHE_CAPACITY: usize = 4;
@@ -162,11 +165,13 @@ impl BuiltFrame {
         self.element_ids.get(&hit)
     }
 
-    pub(crate) fn hover_handler(&self, id: &GlobalElementId) -> Option<&HoverHandler> {
+    #[must_use]
+    pub fn hover_handler(&self, id: &GlobalElementId) -> Option<&HoverHandler> {
         self.hover_handlers.get(id)
     }
 
-    pub(crate) fn cursor_style(&self, hit: HitId) -> CursorStyle {
+    #[must_use]
+    pub fn cursor_style(&self, hit: HitId) -> CursorStyle {
         self.cursor_styles.get(&hit).copied().unwrap_or_default()
     }
 }
@@ -362,6 +367,29 @@ impl FrameBuilder {
     /// calls this to force the repaint instead. Layout is untouched — scrolling never relays out.
     pub fn note_scrolled(&mut self) {
         self.paint_generation = self.paint_generation.saturating_add(1);
+    }
+
+    /// Refreshes Windows system-derived font values and invalidates every result that embeds text
+    /// metrics or glyph placement when they changed.
+    ///
+    /// Explicit family-and-size requests do not query Windows and cannot be invalidated by a
+    /// system font change. Retained atlas pixels remain safe because their bounded keys include
+    /// font identity and em size; shaped text, layout, and scene revisions are invalidated here.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured text error when Windows cannot provide valid UI font metrics.
+    #[cfg(target_os = "windows")]
+    pub fn refresh_system_ui_font(&mut self) -> Result<bool, FrameBuildError> {
+        if !self.font.uses_system_defaults() || !self.text.refresh_system_ui_font()? {
+            return Ok(false);
+        }
+        self.shaped_text.clear();
+        self.positioned_text.clear();
+        self.revisions.measure = self.revisions.measure.saturating_add(1);
+        self.layout_generation = self.layout_generation.saturating_add(1);
+        self.paint_generation = self.paint_generation.saturating_add(1);
+        Ok(true)
     }
 
     #[must_use]
@@ -1405,7 +1433,7 @@ mod tests {
         // A tiny atlas forces a clear + repack once enough distinct glyphs are shaped. After the
         // repack, previously cached shapes hold absolute UVs against the old layout and must be
         // evicted rather than served.
-        let mut builder = FrameBuilder::new_with_font(FontSpec::new("Helvetica", 16.0)).unwrap();
+        let mut builder = FrameBuilder::new_with_font(FontSpec::system_ui(16.0)).unwrap();
         // Shrink the atlas so overflow is easy to trigger deterministically.
         builder.text = TextSystem::new(AtlasConfig::new(128, 128, 4)).unwrap();
 
