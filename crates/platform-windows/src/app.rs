@@ -434,7 +434,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
             if state.error.is_some() {
                 return Ok(false);
             }
-            let changed = state.frame_builder.refresh_system_ui_font()?;
+            let changed = state.frame_builder.refresh_system_text_settings()?;
             if changed {
                 state.needs_frame = true;
             }

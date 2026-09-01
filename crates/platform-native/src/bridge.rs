@@ -369,19 +369,19 @@ impl FrameBuilder {
         self.paint_generation = self.paint_generation.saturating_add(1);
     }
 
-    /// Refreshes Windows system-derived font values and invalidates every result that embeds text
-    /// metrics or glyph placement when they changed.
+    /// Refreshes Windows system-derived text settings and invalidates every result that embeds text
+    /// metrics, shaping, fallback, or glyph placement when they changed.
     ///
-    /// Explicit family-and-size requests do not query Windows and cannot be invalidated by a
-    /// system font change. Retained atlas pixels remain safe because their bounded keys include
-    /// font identity and em size; shaped text, layout, and scene revisions are invalidated here.
+    /// A language change can affect shaping and fallback for explicit fonts too. Retained atlas
+    /// pixels remain safe because their bounded keys include font identity and em size; shaped
+    /// text, layout, and scene revisions are invalidated here.
     ///
     /// # Errors
     ///
-    /// Returns a structured text error when Windows cannot provide valid UI font metrics.
+    /// Returns a structured text error when Windows cannot provide valid UI text settings.
     #[cfg(target_os = "windows")]
-    pub fn refresh_system_ui_font(&mut self) -> Result<bool, FrameBuildError> {
-        if !self.font.uses_system_defaults() || !self.text.refresh_system_ui_font()? {
+    pub fn refresh_system_text_settings(&mut self) -> Result<bool, FrameBuildError> {
+        if !self.text.refresh_system_text_settings()? {
             return Ok(false);
         }
         self.shaped_text.clear();

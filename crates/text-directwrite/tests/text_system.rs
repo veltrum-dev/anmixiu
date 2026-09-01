@@ -5,10 +5,14 @@ use std::{ffi::c_void, mem::size_of};
 
 use anmixiu_scene::Point;
 use anmixiu_text_directwrite::{AtlasConfig, FontSpec, ShapedText, TextError, TextSystem};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory,
+};
 use windows::Win32::UI::{
     HiDpi::SystemParametersInfoForDpi,
     WindowsAndMessaging::{NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS},
 };
+use windows::core::PCWSTR;
 
 const LOGICAL_DPI: u32 = 96;
 
@@ -36,8 +40,33 @@ fn current_system_ui_font() -> (String, f32) {
         .position(|character| *character == 0)
         .unwrap_or(face_name.len());
     let family = String::from_utf16(&face_name[..length]).unwrap();
-    let size = metrics.lfMessageFont.lfHeight.unsigned_abs() as f32;
-    (family, size)
+    let size = metrics.lfMessageFont.lfHeight.unsigned_abs() as f32 * (14.0 / 12.0);
+    let mut font_collection = None;
+    // SAFETY: DirectWrite initializes the valid out parameter and the shared factory remains
+    // alive while the collection is queried.
+    let factory: IDWriteFactory =
+        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.unwrap();
+    unsafe { factory.GetSystemFontCollection(&raw mut font_collection, false) }.unwrap();
+    let font_collection = font_collection.unwrap();
+    let resolved_family = ["Segoe UI Variable", "Segoe UI"]
+        .into_iter()
+        .find(|candidate| {
+            let wide = candidate
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut index = 0;
+            let mut exists = windows::core::BOOL::default();
+            // SAFETY: `wide` is nul-terminated and both out parameters are valid for this call.
+            unsafe {
+                font_collection
+                    .FindFamilyName(PCWSTR(wide.as_ptr()), &raw mut index, &raw mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+            }
+        })
+        .map_or(family, str::to_owned);
+    (resolved_family, size)
 }
 
 fn shape(font: &FontSpec) -> ShapedText {

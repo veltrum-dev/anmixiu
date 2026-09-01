@@ -44,7 +44,7 @@ impl Default for AtlasConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FontFamily {
-    /// The current Windows non-client message/UI font family.
+    /// The current Windows-native system UI family resolved by the platform text backend.
     SystemUi,
     /// A caller-selected DirectWrite family name.
     Named(String),
@@ -152,6 +152,8 @@ pub enum TextError {
     DirectWrite(String),
     #[error("Windows system UI font could not be resolved: {0}")]
     SystemUiFont(String),
+    #[error("Windows system UI language could not be resolved: {0}")]
+    SystemUiLanguage(String),
     #[error("DirectWrite is only available on Windows")]
     UnsupportedPlatform,
 }
@@ -178,22 +180,27 @@ mod platform {
     use windows::{
         Win32::{
             Foundation::{E_POINTER, RECT},
+            Globalization::{
+                GetThreadPreferredUILanguages, GetUserDefaultLocaleName, MUI_LANGUAGE_NAME,
+            },
             Graphics::DirectWrite::{
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN,
-                DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_LINE_METRICS, DWRITE_MATRIX,
-                DWRITE_MEASURING_MODE, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-                DWRITE_STRIKETHROUGH, DWRITE_TEXTURE_CLEARTYPE_3x1, DWRITE_UNDERLINE,
-                DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory,
+                DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_LINE_METRICS,
+                DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_RENDERING_MODE_NATURAL,
+                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_STRIKETHROUGH,
+                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXTURE_ALIASED_1x1, DWRITE_UNDERLINE,
+                DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFactory2,
                 IDWriteFontCollection, IDWriteFontFace, IDWriteFontFile, IDWriteInlineObject,
                 IDWritePixelSnapping_Impl, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
             },
+            System::SystemServices::LOCALE_NAME_MAX_LENGTH,
             UI::{
                 HiDpi::SystemParametersInfoForDpi,
                 WindowsAndMessaging::{NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS},
             },
         },
-        core::{BOOL, Error as WindowsError, PCWSTR, Ref, implement},
+        core::{BOOL, Error as WindowsError, Interface, PCWSTR, PWSTR, Ref, implement},
     };
 
     use super::{
@@ -203,7 +210,8 @@ mod platform {
 
     const GLYPH_PADDING: u32 = 2;
     const LOGICAL_DPI: u32 = 96;
-    const LOCALE: &str = "en-us";
+    const LEGACY_MESSAGE_FONT_SIZE: f32 = 12.0;
+    const MODERN_UI_BODY_FONT_SIZE: f32 = 14.0;
     const UNBOUNDED_LAYOUT: f32 = 1_000_000.0;
 
     #[allow(clippy::needless_pass_by_value)]
@@ -217,7 +225,39 @@ mod platform {
         size: f32,
     }
 
-    fn resolve_system_ui_font() -> Result<SystemUiFont, TextError> {
+    fn family_is_available(
+        font_collection: &IDWriteFontCollection,
+        family: &str,
+    ) -> Result<bool, TextError> {
+        let wide = wide_null(family);
+        let mut index = 0;
+        let mut exists = BOOL::default();
+        // SAFETY: `wide` is nul-terminated and both out parameters are valid for this call.
+        unsafe {
+            font_collection.FindFamilyName(PCWSTR(wide.as_ptr()), &raw mut index, &raw mut exists)
+        }
+        .map_err(directwrite_error)?;
+        Ok(exists.as_bool())
+    }
+
+    fn modern_ui_font_size(message_font_size: f32) -> f32 {
+        message_font_size * (MODERN_UI_BODY_FONT_SIZE / LEGACY_MESSAGE_FONT_SIZE)
+    }
+
+    fn rendering_mode_for_size(
+        font_em_size: f32,
+        scale: f32,
+    ) -> windows::Win32::Graphics::DirectWrite::DWRITE_RENDERING_MODE {
+        if font_em_size * scale < 16.0 {
+            DWRITE_RENDERING_MODE_NATURAL
+        } else {
+            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC
+        }
+    }
+
+    fn resolve_system_ui_font(
+        font_collection: &IDWriteFontCollection,
+    ) -> Result<SystemUiFont, TextError> {
         let mut metrics = NONCLIENTMETRICSW {
             cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).map_err(|error| {
                 TextError::SystemUiFont(format!("NONCLIENTMETRICSW size is invalid: {error}"))
@@ -249,13 +289,95 @@ mod platform {
                 "NONCLIENTMETRICS returned an empty message-font family".to_owned(),
             ));
         }
-        let size = metrics.lfMessageFont.lfHeight.unsigned_abs() as f32;
+        let message_font_size = metrics.lfMessageFont.lfHeight.unsigned_abs() as f32;
+        let size = modern_ui_font_size(message_font_size);
         if size <= 0.0 {
             return Err(TextError::SystemUiFont(
                 "NONCLIENTMETRICS returned a zero message-font height".to_owned(),
             ));
         }
-        Ok(SystemUiFont { family, size })
+        // Windows 11's modern UI uses Segoe UI Variable for Latin and relies on DirectWrite's
+        // locale-aware fallback for scripts such as CJK. Older Windows versions expose Segoe UI;
+        // the non-client family remains the final fallback for customized or minimal systems.
+        let mut resolved_family = family;
+        for candidate in ["Segoe UI Variable", "Segoe UI"] {
+            if family_is_available(font_collection, candidate)? {
+                candidate.clone_into(&mut resolved_family);
+                break;
+            }
+        }
+        Ok(SystemUiFont {
+            family: resolved_family,
+            size,
+        })
+    }
+
+    fn first_language_name(buffer: &[u16]) -> Result<String, String> {
+        let length = buffer
+            .iter()
+            .position(|character| *character == 0)
+            .ok_or_else(|| "Windows returned a language buffer without a terminator".to_owned())?;
+        if length == 0 {
+            return Err("Windows returned an empty language name".to_owned());
+        }
+        String::from_utf16(&buffer[..length]).map_err(|error| error.to_string())
+    }
+
+    fn resolve_thread_ui_language() -> Result<String, String> {
+        let mut language_count = 0;
+        let mut buffer_length = 0;
+        // SAFETY: Null output requests the required multistring length; both counters are valid
+        // writable out parameters.
+        unsafe {
+            GetThreadPreferredUILanguages(
+                MUI_LANGUAGE_NAME,
+                &raw mut language_count,
+                None,
+                &raw mut buffer_length,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        let capacity = usize::try_from(buffer_length)
+            .map_err(|error| format!("preferred-language buffer length is invalid: {error}"))?;
+        if capacity == 0 || language_count == 0 {
+            return Err("Windows returned no preferred thread UI languages".to_owned());
+        }
+        let mut buffer = vec![0_u16; capacity];
+        // SAFETY: `buffer` has the exact UTF-16 capacity requested above and remains writable for
+        // the duration of the call; both counters are valid in/out parameters.
+        unsafe {
+            GetThreadPreferredUILanguages(
+                MUI_LANGUAGE_NAME,
+                &raw mut language_count,
+                Some(PWSTR(buffer.as_mut_ptr())),
+                &raw mut buffer_length,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        first_language_name(&buffer)
+    }
+
+    fn resolve_user_locale() -> Result<String, String> {
+        let capacity = usize::try_from(LOCALE_NAME_MAX_LENGTH)
+            .map_err(|error| format!("locale-name capacity is invalid: {error}"))?;
+        let mut buffer = vec![0_u16; capacity];
+        // SAFETY: `buffer` is writable and has Windows' documented maximum locale-name capacity.
+        let length = unsafe { GetUserDefaultLocaleName(&mut buffer) };
+        if length == 0 {
+            return Err(WindowsError::from_thread().to_string());
+        }
+        first_language_name(&buffer)
+    }
+
+    fn resolve_system_ui_language() -> Result<String, TextError> {
+        match resolve_thread_ui_language() {
+            Ok(language) => Ok(language),
+            Err(thread_error) => resolve_user_locale().map_err(|locale_error| {
+                TextError::SystemUiLanguage(format!(
+                    "preferred thread UI language failed ({thread_error}); user locale fallback failed ({locale_error})"
+                ))
+            }),
+        }
     }
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -604,8 +726,10 @@ mod platform {
     #[derive(Debug)]
     pub struct TextSystem {
         factory: IDWriteFactory,
+        analysis_factory: IDWriteFactory2,
         font_collection: IDWriteFontCollection,
         system_ui_font: SystemUiFont,
+        system_ui_language: String,
         atlas: GlyphAtlas,
         rasterized_glyphs: u64,
     }
@@ -624,6 +748,9 @@ mod platform {
             let factory: IDWriteFactory =
                 unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
                     .map_err(directwrite_error)?;
+            let analysis_factory = factory
+                .cast::<IDWriteFactory2>()
+                .map_err(directwrite_error)?;
             let mut font_collection = None;
             // SAFETY: `font_collection` is a valid out parameter and `false` avoids a blocking
             // system-font rescan on this UI-facing initialization path.
@@ -632,31 +759,49 @@ mod platform {
             let font_collection = font_collection.ok_or_else(|| {
                 TextError::DirectWrite("system font collection was not returned".to_owned())
             })?;
-            let system_ui_font = resolve_system_ui_font()?;
+            let system_ui_font = resolve_system_ui_font(&font_collection)?;
+            let system_ui_language = resolve_system_ui_language()?;
             Ok(Self {
                 factory,
+                analysis_factory,
                 font_collection,
                 system_ui_font,
+                system_ui_language,
                 atlas,
                 rasterized_glyphs: 0,
             })
         }
 
-        /// Re-reads the current Windows UI font family and logical size.
+        /// Re-reads the current Windows UI font and effective text language.
         ///
-        /// Returns whether either value changed. Callers retaining shaped text or layout results
-        /// must invalidate those caches when this returns `true`.
+        /// Returns whether any setting changed. Callers retaining shaped text or layout results
+        /// must invalidate those caches when this returns `true`; language changes can affect
+        /// shaping and font fallback even when the requested font is explicit.
         ///
         /// # Errors
         ///
-        /// Returns a structured error when Windows does not provide valid non-client metrics.
-        pub fn refresh_system_ui_font(&mut self) -> Result<bool, TextError> {
-            let current = resolve_system_ui_font()?;
-            if current == self.system_ui_font {
+        /// Returns a structured error when Windows does not provide valid font or language data.
+        pub fn refresh_system_text_settings(&mut self) -> Result<bool, TextError> {
+            let current_font = resolve_system_ui_font(&self.font_collection)?;
+            let current_language = resolve_system_ui_language()?;
+            if current_font == self.system_ui_font && current_language == self.system_ui_language {
                 return Ok(false);
             }
-            self.system_ui_font = current;
+            self.system_ui_font = current_font;
+            self.system_ui_language = current_language;
             Ok(true)
+        }
+
+        /// Compatibility entry point for callers that previously refreshed only the UI font.
+        ///
+        /// The refresh now also observes the effective Windows UI language because it can change
+        /// shaping and fallback. The return value is `true` when either setting changed.
+        ///
+        /// # Errors
+        ///
+        /// Returns a structured error when Windows does not provide valid font or language data.
+        pub fn refresh_system_ui_font(&mut self) -> Result<bool, TextError> {
+            self.refresh_system_text_settings()
         }
 
         #[must_use]
@@ -734,7 +879,7 @@ mod platform {
                 font_spec.size
             };
             let family_wide = wide_null(family);
-            let locale_wide = wide_null(LOCALE);
+            let locale_wide = wide_null(&self.system_ui_language);
             // SAFETY: Both UTF-16 buffers are nul-terminated for the duration of the call; the
             // system font collection and factory outlive the returned format.
             let format = unsafe {
@@ -799,7 +944,7 @@ mod platform {
             let runs = collected
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let raster_glyphs = collect_raster_glyphs(&self.factory, &runs, scale)?;
+            let raster_glyphs = collect_raster_glyphs(&self.analysis_factory, &runs, scale)?;
             drop(runs);
 
             let mut unique = HashSet::new();
@@ -888,19 +1033,7 @@ mod platform {
         }
 
         fn validate_family(&self, family: &str) -> Result<(), TextError> {
-            let wide = wide_null(family);
-            let mut index = 0;
-            let mut exists = BOOL::default();
-            // SAFETY: `wide` is nul-terminated and both out parameters are valid for this call.
-            unsafe {
-                self.font_collection.FindFamilyName(
-                    PCWSTR(wide.as_ptr()),
-                    &raw mut index,
-                    &raw mut exists,
-                )
-            }
-            .map_err(directwrite_error)?;
-            if exists.as_bool() {
+            if family_is_available(&self.font_collection, family)? {
                 Ok(())
             } else {
                 Err(TextError::FontUnavailable {
@@ -911,11 +1044,19 @@ mod platform {
     }
 
     fn collect_raster_glyphs(
-        factory: &IDWriteFactory,
+        factory: &IDWriteFactory2,
         runs: &[CollectedRun],
         scale: f32,
     ) -> Result<Vec<RasterGlyph>, TextError> {
         let mut result = Vec::new();
+        let transform = DWRITE_MATRIX {
+            m11: scale,
+            m12: 0.0,
+            m21: 0.0,
+            m22: scale,
+            dx: 0.0,
+            dy: 0.0,
+        };
         for run in runs {
             let font_identity = font_identity(&run.font_face)?;
             let direction = if run.bidi_level & 1 == 0 { 1.0 } else { -1.0 };
@@ -943,23 +1084,24 @@ mod platform {
                     bidiLevel: run.bidi_level,
                 };
                 // SAFETY: `native_run` and its single-element arrays remain alive through the
-                // call; the returned analysis retains the COM font face it needs.
+                // call; `transform` scales DIPs into current display pixels and the returned
+                // analysis retains the COM font face it needs.
                 let analysis = unsafe {
                     factory.CreateGlyphRunAnalysis(
                         &raw const native_run,
-                        scale,
-                        None,
-                        DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                        Some(&raw const transform),
+                        rendering_mode_for_size(run.font_em_size, scale),
                         run.measuring_mode,
+                        DWRITE_GRID_FIT_MODE_DEFAULT,
+                        DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
                         baseline_x,
                         baseline_y,
                     )
                 }
                 .map_err(directwrite_error)?;
                 // SAFETY: The analysis object is live and returns a value RECT.
-                let bounds =
-                    unsafe { analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1) }
-                        .map_err(directwrite_error)?;
+                let bounds = unsafe { analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }
+                    .map_err(directwrite_error)?;
                 let width = u32::try_from((bounds.right - bounds.left).max(0)).unwrap_or(u32::MAX);
                 let height = u32::try_from((bounds.bottom - bounds.top).max(0)).unwrap_or(u32::MAX);
                 if width != 0 && height != 0 {
@@ -1006,19 +1148,48 @@ mod platform {
         Ok(result)
     }
 
+    fn copy_grayscale_mask(
+        source: &[u8],
+        width: u32,
+        height: u32,
+        padding: u32,
+    ) -> Option<Vec<u8>> {
+        let source_width = usize::try_from(width).ok()?;
+        let source_height = usize::try_from(height).ok()?;
+        let expected_source_len = source_width.checked_mul(source_height)?;
+        if source.len() != expected_source_len {
+            return None;
+        }
+        let double_padding = padding.checked_mul(2)?;
+        let padded_width = width.checked_add(double_padding)?;
+        let padded_height = height.checked_add(double_padding)?;
+        let target_width = usize::try_from(padded_width).ok()?;
+        let target_height = usize::try_from(padded_height).ok()?;
+        let padding = usize::try_from(padding).ok()?;
+        let mut pixels = vec![0_u8; target_width.checked_mul(target_height)?];
+        for (row, source_row) in source.chunks_exact(source_width).enumerate() {
+            let start = row
+                .checked_add(padding)?
+                .checked_mul(target_width)?
+                .checked_add(padding)?;
+            let end = start.checked_add(source_width)?;
+            pixels.get_mut(start..end)?.copy_from_slice(source_row);
+        }
+        Some(pixels)
+    }
+
     fn rasterize(glyph: &RasterGlyph) -> Result<GlyphBitmap, TextError> {
         let width =
             u32::try_from((glyph.bounds.right - glyph.bounds.left).max(0)).unwrap_or(u32::MAX);
         let height =
             u32::try_from((glyph.bounds.bottom - glyph.bounds.top).max(0)).unwrap_or(u32::MAX);
-        let clear_type_len = usize::try_from(width)
+        let grayscale_len = usize::try_from(width)
             .ok()
             .and_then(|width| {
                 usize::try_from(height)
                     .ok()
                     .and_then(|height| width.checked_mul(height))
             })
-            .and_then(|pixels| pixels.checked_mul(3))
             .filter(|length| u32::try_from(*length).is_ok())
             .ok_or(TextError::GlyphTooLarge {
                 glyph: glyph.glyph,
@@ -1027,54 +1198,26 @@ mod platform {
                 atlas_width: glyph.padded_width,
                 atlas_height: glyph.padded_height,
             })?;
-        let mut clear_type = vec![0_u8; clear_type_len];
-        // SAFETY: The buffer is exactly `width * height * 3` bytes for a ClearType texture and
-        // `glyph.bounds` is the rectangle obtained from this same analysis object.
+        let mut grayscale = vec![0_u8; grayscale_len];
+        // SAFETY: The buffer is exactly `width * height` bytes for the single-channel texture and
+        // `glyph.bounds` is the rectangle obtained from this same grayscale analysis object.
         unsafe {
             glyph.analysis.CreateAlphaTexture(
-                DWRITE_TEXTURE_CLEARTYPE_3x1,
+                DWRITE_TEXTURE_ALIASED_1x1,
                 &raw const glyph.bounds,
-                &mut clear_type,
+                &mut grayscale,
             )
         }
         .map_err(directwrite_error)?;
-        let pixel_count = usize::try_from(glyph.padded_width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(glyph.padded_height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .ok_or(TextError::GlyphTooLarge {
+        let pixels = copy_grayscale_mask(&grayscale, width, height, GLYPH_PADDING).ok_or(
+            TextError::GlyphTooLarge {
                 glyph: glyph.glyph,
                 width: glyph.padded_width,
                 height: glyph.padded_height,
                 atlas_width: glyph.padded_width,
                 atlas_height: glyph.padded_height,
-            })?;
-        let mut pixels = vec![0_u8; pixel_count];
-        let source_width = usize::try_from(width).unwrap_or(usize::MAX);
-        let target_width = usize::try_from(glyph.padded_width).unwrap_or(usize::MAX);
-        let padding = usize::try_from(GLYPH_PADDING).unwrap_or(0);
-        for (row, source) in clear_type.chunks_exact(source_width * 3).enumerate() {
-            let start = (row + padding) * target_width + padding;
-            let end = start + source_width;
-            let Some(target) = pixels.get_mut(start..end) else {
-                return Err(TextError::GlyphTooLarge {
-                    glyph: glyph.glyph,
-                    width: glyph.padded_width,
-                    height: glyph.padded_height,
-                    atlas_width: glyph.padded_width,
-                    atlas_height: glyph.padded_height,
-                });
-            };
-            #[allow(clippy::chunks_exact_to_as_chunks)]
-            for (alpha, channels) in target.iter_mut().zip(source.chunks_exact(3)) {
-                let coverage =
-                    (u16::from(channels[0]) + u16::from(channels[1]) + u16::from(channels[2])) / 3;
-                *alpha = u8::try_from(coverage).unwrap_or(u8::MAX);
-            }
-        }
+            },
+        )?;
         Ok(GlyphBitmap {
             key: glyph.key.clone(),
             glyph: glyph.glyph,
@@ -1139,6 +1282,56 @@ mod platform {
 
     fn wide_null(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            copy_grayscale_mask, first_language_name, modern_ui_font_size, rendering_mode_for_size,
+        };
+        use windows::Win32::Graphics::DirectWrite::{
+            DWRITE_RENDERING_MODE_NATURAL, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        };
+
+        #[test]
+        fn first_language_name_reads_only_the_leading_multistring_entry() {
+            let languages = "zh-Hans-CN\0en-US\0\0".encode_utf16().collect::<Vec<_>>();
+
+            assert_eq!(first_language_name(&languages).unwrap(), "zh-Hans-CN");
+        }
+
+        #[test]
+        fn grayscale_mask_copy_preserves_one_coverage_byte_per_pixel_and_padding() {
+            let source = [0, 64, 128, 255];
+
+            assert_eq!(
+                copy_grayscale_mask(&source, 2, 2, 1).unwrap(),
+                vec![
+                    0, 0, 0, 0, // top padding
+                    0, 0, 64, 0, // first mask row
+                    0, 128, 255, 0, // second mask row
+                    0, 0, 0, 0, // bottom padding
+                ]
+            );
+        }
+
+        #[test]
+        fn modern_ui_font_size_scales_the_legacy_message_font_baseline() {
+            assert!((modern_ui_font_size(12.0) - 14.0).abs() < f32::EPSILON);
+            assert!((modern_ui_font_size(18.0) - 21.0).abs() < f32::EPSILON);
+        }
+
+        #[test]
+        fn small_ui_text_uses_natural_rendering_and_large_text_keeps_symmetric_smoothing() {
+            assert_eq!(
+                rendering_mode_for_size(14.0, 1.0).0,
+                DWRITE_RENDERING_MODE_NATURAL.0
+            );
+            assert_eq!(
+                rendering_mode_for_size(18.0, 1.0).0,
+                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC.0
+            );
+        }
     }
 }
 
