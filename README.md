@@ -132,3 +132,8 @@ See [docs/architecture.md](docs/architecture.md) for crate boundaries and runtim
 ## License
 
 Anmixiu is distributed under the [MIT License](LICENSE).
+
+Commercial and open-source distributors should also review the
+[legal and distribution notes](https://github.com/veltrum-dev/anmixiu/blob/main/docs/legal.md).
+Contributors should follow the
+[source-provenance requirements](https://github.com/veltrum-dev/anmixiu/blob/main/CONTRIBUTING.md).
