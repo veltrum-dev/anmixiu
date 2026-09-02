@@ -15,8 +15,8 @@ use std::{
 };
 
 use anmixiu_core::{
-    AppStateStore, ComponentHost, Context, CursorStyle, GlobalElementId, Pixels, Render,
-    Typography, WindowStateStore,
+    AppEvents, AppStateStore, ComponentHost, Context, CursorStyle, EventBindings, Eventful,
+    GlobalElementId, Pixels, Render, Typography, WindowId, WindowStateStore,
 };
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
 use anmixiu_render_d3d11::{D3d11Renderer, FrameOutcome, RenderError, SurfaceSize};
@@ -194,6 +194,7 @@ pub struct App {
     state: AppStateStore,
     window: Window,
     typography: Typography,
+    events: AppEvents,
 }
 
 impl Default for App {
@@ -202,6 +203,7 @@ impl Default for App {
             state: AppStateStore::new(),
             window: Window::new(),
             typography: Typography::new(),
+            events: AppEvents::new(),
         }
     }
 }
@@ -236,6 +238,12 @@ impl App {
         self
     }
 
+    /// Returns this App's shared typed event router.
+    #[must_use]
+    pub fn events(&self) -> AppEvents {
+        self.events.clone()
+    }
+
     /// Creates one native Win32 window and blocks in its message loop until it closes.
     ///
     /// # Errors
@@ -244,6 +252,21 @@ impl App {
     /// native frame cannot be built or presented, or when the component exceeds the guarded
     /// self-invalidation limit.
     pub fn run<C: Render>(self, root: C) -> Result<(), AppError> {
+        self.run_internal(root, None)
+    }
+
+    /// Starts Win32 with the root Element's optional [`Eventful`] capability enabled.
+    ///
+    /// [`Eventful::bind_events`] is invoked once after the first frame is painted.
+    pub fn run_eventful<C: Render + Eventful>(self, root: C) -> Result<(), AppError> {
+        self.run_internal(root, Some(register_eventful::<C>))
+    }
+
+    fn run_internal<C: Render>(
+        self,
+        root: C,
+        event_registrar: Option<EventRegistrar<C>>,
+    ) -> Result<(), AppError> {
         // SAFETY: DPI awareness is selected before creating any HWND. ERROR_ACCESS_DENIED means a
         // manifest or the host process already selected awareness, so continuing is correct.
         let dpi_result =
@@ -254,11 +277,16 @@ impl App {
             return Err(win32_error(error));
         }
         let typography = self.window.typography.with_fallback(&self.typography);
-        let driver = Rc::new(ComponentDriver::new(
+        let driver = Rc::new(ComponentDriver::new_with_registrar(
             root,
             self.state,
             self.window.state,
             font_spec(&typography),
+            EventConfig {
+                app_events: self.events,
+                window_id: WindowId::new(1),
+                event_registrar,
+            },
         )?);
         ACTIVE_DRIVER.with(|active| {
             active.replace(Some(driver.clone()));
@@ -304,6 +332,22 @@ impl App {
         message_result?;
         driver.take_error().map_or(Ok(()), Err)
     }
+}
+
+type EventRegistrar<C> = fn(&C, &mut Context<C>, &mut EventBindings);
+
+struct EventConfig<C: 'static> {
+    app_events: AppEvents,
+    window_id: WindowId,
+    event_registrar: Option<EventRegistrar<C>>,
+}
+
+fn register_eventful<C: Render + Eventful>(
+    root: &C,
+    cx: &mut Context<C>,
+    bindings: &mut EventBindings,
+) {
+    root.bind_events(cx, bindings);
 }
 
 fn font_spec(typography: &Typography) -> FontSpec {
@@ -356,18 +400,21 @@ struct ComponentDriver<C: Render> {
 }
 
 impl<C: Render> ComponentDriver<C> {
-    fn new(
+    fn new_with_registrar(
         root: C,
         app_state: AppStateStore,
         window_state: WindowStateStore,
         font: FontSpec,
+        event_config: EventConfig<C>,
     ) -> Result<Self, AppError> {
         let runtime = AppRuntime::new(wake_win32)?;
         let owners = OwnerRegistry::new();
         let spawner = runtime.ui().spawner(owners.clone());
-        let context = Context::with_owner_spawner(
+        let context = Context::with_owner_spawner_and_events(
             app_state,
             window_state,
+            event_config.app_events,
+            event_config.window_id,
             owners.clone(),
             move |owner, future| {
                 if let Err(error) = spawner.spawn(owner, future) {
@@ -376,12 +423,18 @@ impl<C: Render> ComponentDriver<C> {
             },
         );
         let owner = context.owner_id();
+        let host = match event_config.event_registrar {
+            Some(registrar) => {
+                ComponentHost::new_with_event_registrar(Rc::new(root), context, registrar)
+            }
+            None => ComponentHost::new(Rc::new(root), context),
+        };
         Ok(Self {
             state: RefCell::new(DriverState {
                 runtime,
                 owners,
                 owner,
-                host: ComponentHost::new(Rc::new(root), context),
+                host,
                 frame_builder: FrameBuilder::new_with_font(font)?,
                 renderer: None,
                 viewport: Viewport::new(1.0, 1.0, 1.0),

@@ -1,4 +1,14 @@
-use crate::{IntoElement, component::Context};
+use crate::{EventBindings, IntoElement, component::Context};
+
+/// Optional event capability for a persistent Element.
+///
+/// The framework invokes [`bind_events`](Self::bind_events) once when the Element is mounted. The
+/// registration set owns the returned subscriptions and drops them with the Element owner. Event
+/// binding is deliberately separate from [`Render`], so ordinary Elements pay no event lifecycle
+/// cost unless they opt in to this capability.
+pub trait Eventful: Sized + 'static {
+    fn bind_events(&self, _cx: &mut Context<Self>, _bindings: &mut EventBindings) {}
+}
 
 /// Persistent component contract.
 ///

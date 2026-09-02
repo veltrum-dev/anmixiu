@@ -2,7 +2,10 @@ use std::{cell::Cell, future::Future, marker::PhantomData, pin::Pin, rc::Rc};
 
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
 
-use crate::{AppStateStore, State, WindowStateStore, state::required_state};
+use crate::{
+    AppEvents, AppStateStore, EventContext, EventError, EventPriority, EventScope, State,
+    Subscription, WindowId, WindowStateStore, state::required_state,
+};
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 type SpawnFn = dyn Fn(LocalFuture);
@@ -11,6 +14,8 @@ type OwnerSpawnFn = dyn Fn(OwnerId, LocalFuture);
 pub struct Context<C: 'static> {
     app_state: AppStateStore,
     window_state: WindowStateStore,
+    app_events: AppEvents,
+    window_id: WindowId,
     spawn: Option<Rc<SpawnFn>>,
     pub(super) registry: OwnerRegistry,
     pub(super) owner: OwnerId,
@@ -23,6 +28,8 @@ impl<C: 'static> Clone for Context<C> {
         Self {
             app_state: self.app_state.clone(),
             window_state: self.window_state.clone(),
+            app_events: self.app_events.clone(),
+            window_id: self.window_id,
             spawn: self.spawn.clone(),
             registry: self.registry.clone(),
             owner: self.owner,
@@ -42,11 +49,29 @@ impl<C: 'static> Context<C> {
     #[doc(hidden)]
     #[must_use]
     pub fn testing_with_state(app_state: AppStateStore, window_state: WindowStateStore) -> Self {
+        Self::testing_with_state_and_events(
+            app_state,
+            window_state,
+            AppEvents::new(),
+            WindowId::new(1),
+        )
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn testing_with_state_and_events(
+        app_state: AppStateStore,
+        window_state: WindowStateStore,
+        app_events: AppEvents,
+        window_id: WindowId,
+    ) -> Self {
         let registry = OwnerRegistry::new();
         let owner = registry.create_owner();
         Self {
             app_state,
             window_state,
+            app_events,
+            window_id,
             spawn: None,
             registry,
             owner,
@@ -62,11 +87,31 @@ impl<C: 'static> Context<C> {
         window_state: WindowStateStore,
         spawn: impl Fn(LocalFuture) + 'static,
     ) -> Self {
+        Self::with_spawner_and_events(
+            app_state,
+            window_state,
+            AppEvents::new(),
+            WindowId::new(1),
+            spawn,
+        )
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_spawner_and_events(
+        app_state: AppStateStore,
+        window_state: WindowStateStore,
+        app_events: AppEvents,
+        window_id: WindowId,
+        spawn: impl Fn(LocalFuture) + 'static,
+    ) -> Self {
         let registry = OwnerRegistry::new();
         let owner = registry.create_owner();
         Self {
             app_state,
             window_state,
+            app_events,
+            window_id,
             spawn: Some(Rc::new(spawn)),
             registry,
             owner,
@@ -83,12 +128,34 @@ impl<C: 'static> Context<C> {
         registry: OwnerRegistry,
         spawn: impl Fn(OwnerId, LocalFuture) + 'static,
     ) -> Self {
+        Self::with_owner_spawner_and_events(
+            app_state,
+            window_state,
+            AppEvents::new(),
+            WindowId::new(1),
+            registry,
+            spawn,
+        )
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_owner_spawner_and_events(
+        app_state: AppStateStore,
+        window_state: WindowStateStore,
+        app_events: AppEvents,
+        window_id: WindowId,
+        registry: OwnerRegistry,
+        spawn: impl Fn(OwnerId, LocalFuture) + 'static,
+    ) -> Self {
         let owner = registry.create_owner();
         let spawn: Rc<OwnerSpawnFn> = Rc::new(spawn);
         let owner_spawn = spawn.clone();
         Self {
             app_state,
             window_state,
+            app_events,
+            window_id,
             spawn: Some(Rc::new(move |future| owner_spawn(owner, future))),
             registry,
             owner,
@@ -107,6 +174,46 @@ impl<C: 'static> Context<C> {
         self.window_state
             .get()
             .or_else(|| self.app_state.get::<T>())
+    }
+
+    /// Creates a cloneable event handle bound to this Element owner and Window.
+    #[must_use]
+    pub fn event_context(&self) -> EventContext {
+        EventContext::new(
+            self.app_events.clone(),
+            self.owner,
+            self.window_id,
+            self.registry.clone(),
+        )
+    }
+
+    /// Emits an owned payload in the selected event scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventError::QueueFull`] when nested dispatch has reached its bounded queue.
+    pub fn emit<E: 'static>(&self, payload: E, scope: EventScope) -> Result<(), EventError> {
+        self.event_context().emit(payload, scope)
+    }
+
+    /// Subscribes this Element owner to an event type.
+    pub fn subscribe<E, F>(
+        &self,
+        scope: EventScope,
+        priority: impl Into<EventPriority>,
+        handler: F,
+    ) -> Subscription
+    where
+        E: 'static,
+        F: FnMut(&E) + 'static,
+    {
+        self.event_context().subscribe(scope, priority, handler)
+    }
+
+    /// Returns this Context's Window identity.
+    #[must_use]
+    pub const fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     /// Schedules an owner-bound local UI future.

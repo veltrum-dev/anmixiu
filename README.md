@@ -118,6 +118,13 @@ Run the two-axis smooth-scroll demo (120 rows with a wide horizontal surface):
 cargo run --example scroll
 ```
 
+Run the typed `Eventful` capability demo. It shows three Window-scope subscriptions dispatched by
+priority (`high → normal → low`) and the live subscription count:
+
+```sh
+cargo run --example event
+```
+
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad
 deltas into a target and follows it on the display link, while the scene paints an unobtrusive
 overlay scrollbar for each overflowing axis.

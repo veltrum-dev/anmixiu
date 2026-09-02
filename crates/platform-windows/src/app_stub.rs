@@ -1,4 +1,6 @@
-use anmixiu_core::{AppStateStore, Pixels, Render, Typography, WindowStateStore};
+use anmixiu_core::{
+    AppEvents, AppStateStore, Eventful, Pixels, Render, Typography, WindowStateStore,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -53,6 +55,7 @@ pub struct App {
     state: AppStateStore,
     window: Window,
     typography: Typography,
+    events: AppEvents,
 }
 
 impl App {
@@ -85,12 +88,21 @@ impl App {
         self
     }
 
+    #[must_use]
+    pub fn events(&self) -> AppEvents {
+        self.events.clone()
+    }
+
     /// Reports that the Win32 host is unavailable on this target.
     ///
     /// # Errors
     ///
     /// Always returns [`AppError::UnsupportedPlatform`].
     pub fn run<C: Render>(self, _root: C) -> Result<(), AppError> {
+        Err(AppError::UnsupportedPlatform)
+    }
+
+    pub fn run_eventful<C: Render + Eventful>(self, _root: C) -> Result<(), AppError> {
         Err(AppError::UnsupportedPlatform)
     }
 }

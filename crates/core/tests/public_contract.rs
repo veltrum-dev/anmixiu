@@ -5,10 +5,11 @@ use std::{
 };
 
 use anmixiu_core::{
-    AppStateStore, Color, ComponentHost, Context, CursorStyle, Element, ElementId, ElementNode,
-    FluentBuilder, FrameBatcher, InteractiveElement, NodeId, ParentElement, Pixels, Render,
-    RenderOnce, SharedString, State, StatefulInteractiveElement, Styled, Typography, WindowId,
-    WindowStateStore, button, div, px, shared_format, text,
+    AppEvents, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element, ElementId,
+    ElementNode, EventPriority, EventScope, Eventful, FluentBuilder, FrameBatcher,
+    InteractiveElement, NodeId, ParentElement, Pixels, Render, RenderOnce, SharedString, State,
+    StatefulInteractiveElement, Styled, Typography, WindowId, WindowStateStore, button, div, px,
+    shared_format, text,
 };
 use anmixiu_reactive::OwnerRegistry;
 use anmixiu_reactive::Signal;
@@ -221,6 +222,159 @@ fn style_and_parent_builders_are_trait_capabilities() {
 
     assert_eq!(element.style_ref().width, Some(px(120.0)));
     assert_eq!(element.children_ref().len(), 1);
+}
+
+#[derive(Clone, Copy)]
+struct Ping;
+
+#[derive(Clone, Copy)]
+struct FollowUp;
+
+#[test]
+fn event_subscriptions_dispatch_by_priority_then_registration_order() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+
+    let first = calls.clone();
+    let _normal = cx.subscribe::<Ping, _>(EventScope::App, EventPriority::NORMAL, move |_| {
+        first.borrow_mut().push("normal-first");
+    });
+    let second = calls.clone();
+    let _high = cx.subscribe::<Ping, _>(EventScope::App, EventPriority::HIGH, move |_| {
+        second.borrow_mut().push("high");
+    });
+    let third = calls.clone();
+    let _normal_second =
+        cx.subscribe::<Ping, _>(EventScope::App, EventPriority::NORMAL, move |_| {
+            third.borrow_mut().push("normal-second");
+        });
+
+    cx.emit(Ping, EventScope::App).expect("event dispatch");
+    assert_eq!(
+        *calls.borrow(),
+        vec!["high", "normal-first", "normal-second"]
+    );
+}
+
+#[test]
+fn nested_events_are_queued_fifo_without_reentrant_router_borrowing() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+
+    let follow_calls = calls.clone();
+    let _follow = cx.subscribe::<FollowUp, _>(EventScope::App, 0, move |_| {
+        follow_calls.borrow_mut().push("follow-up");
+    });
+    let ping_calls = calls.clone();
+    let nested_events = events.clone();
+    let _ping = cx.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+        ping_calls.borrow_mut().push("ping");
+        nested_events
+            .emit(FollowUp, EventScope::App)
+            .expect("nested event dispatch");
+    });
+
+    events.emit(Ping, EventScope::App).expect("event dispatch");
+    assert_eq!(*calls.borrow(), vec!["ping", "follow-up"]);
+}
+
+#[test]
+fn event_scopes_route_window_and_app_events() {
+    let events = AppEvents::new();
+    let first = Context::<LifecycleProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events.clone(),
+        WindowId::new(1),
+    );
+    let second = Context::<LifecycleProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events,
+        WindowId::new(2),
+    );
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let first_calls = calls.clone();
+    let _first_window = first.subscribe::<Ping, _>(EventScope::Window, 0, move |_| {
+        first_calls.borrow_mut().push("window-1");
+    });
+    let second_calls = calls.clone();
+    let _second_window = second.subscribe::<Ping, _>(EventScope::Window, 0, move |_| {
+        second_calls.borrow_mut().push("window-2");
+    });
+    let app_calls = calls.clone();
+    let _first_app = first.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+        app_calls.borrow_mut().push("app-1");
+    });
+
+    let first_subscriptions = first.event_context().subscriptions();
+    assert_eq!(first_subscriptions.len(), 2);
+    assert_eq!(first_subscriptions[0].scope, EventScope::Window);
+    assert_eq!(first_subscriptions[1].scope, EventScope::App);
+    assert_eq!(first_subscriptions[0].priority, EventPriority::NORMAL);
+
+    first.emit(Ping, EventScope::Window).expect("window event");
+    assert_eq!(*calls.borrow(), vec!["window-1"]);
+    calls.borrow_mut().clear();
+
+    second.emit(Ping, EventScope::App).expect("app event");
+    assert_eq!(*calls.borrow(), vec!["app-1"]);
+}
+
+#[test]
+fn unmount_removes_event_subscriptions() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let _subscription = cx.subscribe::<Ping, _>(EventScope::App, 0, |_| {});
+    assert_eq!(events.subscription_count(), 1);
+
+    let registry = cx.owner_registry().clone();
+    assert!(registry.remove_owner(cx.owner_id()));
+    assert_eq!(events.subscription_count(), 0);
+}
+
+#[derive(Default)]
+struct EventfulProbe {
+    count: Signal<u32>,
+}
+
+impl Eventful for EventfulProbe {
+    fn bind_events(&self, _cx: &mut Context<Self>, bindings: &mut anmixiu_core::EventBindings) {
+        let count = self.count.clone();
+        bindings.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+            count.update(|value| *value += 1);
+        });
+    }
+}
+
+impl Render for EventfulProbe {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        text(self.count.get().to_string())
+    }
+}
+
+#[test]
+fn eventful_capability_binds_once_when_host_paints() {
+    let events = AppEvents::new();
+    let context = Context::<EventfulProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events,
+        WindowId::new(3),
+    );
+    let emitter = context.event_context();
+    let probe = Rc::new(EventfulProbe::default());
+    let mut host = ComponentHost::new_eventful(probe.clone(), context);
+
+    host.render().expect("initial render");
+    host.did_paint();
+    host.did_paint();
+    emitter.emit(Ping, EventScope::App).expect("event dispatch");
+    assert_eq!(probe.count.get(), 1);
+    assert_eq!(host.reactive_stats().live_owner_count, 1);
+    host.unmount();
+    assert_eq!(emitter.subscription_count(), 0);
 }
 
 #[test]

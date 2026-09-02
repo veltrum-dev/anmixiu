@@ -2,18 +2,23 @@
 
 mod component;
 mod element;
+mod events;
 mod scheduler;
 mod shared_string;
 mod state;
 mod typography;
 
-pub use component::{ComponentHost, Context, Render, RenderError, RenderOnce};
+pub use component::{ComponentHost, Context, Eventful, Render, RenderError, RenderOnce};
 pub use element::{
     AlignItems, ButtonElement, ClickHandler, Color, CursorStyle, DivElement, Element, ElementId,
     ElementNode, FlexDirection, FluentBuilder, GlobalElementId, HitNode, HoverHandler,
     InteractiveElement, IntoClickHandler, IntoElement, IntoHoverHandler, JustifyContent, NodeId,
     ParentElement, Pixels, ScrollHandle, Stateful, StatefulInteractiveElement, Style,
     StyleRefinement, Styled, TextElement, button, div, px, text,
+};
+pub use events::{
+    AppEvents, EventBindings, EventContext, EventError, EventPriority, EventScope,
+    EventSubscriptionInfo, MAX_PENDING_EVENTS, Subscription,
 };
 pub use scheduler::{FrameBatcher, FrameLoopError, WindowId};
 pub use shared_string::SharedString;

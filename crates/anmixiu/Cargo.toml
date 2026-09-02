@@ -38,5 +38,9 @@ path = "../../examples/counter.rs"
 name = "scroll"
 path = "../../examples/scroll.rs"
 
+[[example]]
+name = "event"
+path = "../../examples/event.rs"
+
 [lints]
 workspace = true
