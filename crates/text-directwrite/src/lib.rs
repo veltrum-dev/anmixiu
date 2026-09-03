@@ -1344,6 +1344,11 @@ pub struct TextSystem;
 
 #[cfg(not(target_os = "windows"))]
 impl TextSystem {
+    /// Reports that the DirectWrite text system is unavailable on this target.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TextError::UnsupportedPlatform`].
     pub fn new(_config: AtlasConfig) -> Result<Self, TextError> {
         Err(TextError::UnsupportedPlatform)
     }
