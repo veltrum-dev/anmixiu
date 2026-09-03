@@ -1,10 +1,11 @@
 use std::{cell::Cell, future::Future, marker::PhantomData, pin::Pin, rc::Rc};
 
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
+use anmixiu_runtime::UiSpawner;
 
 use crate::{
-    AppEvents, AppStateStore, EventContext, EventError, EventPriority, EventScope, State,
-    Subscription, WindowId, WindowStateStore, state::required_state,
+    AppEvents, AppHandle, AppStateStore, EventContext, EventError, EventPriority, EventScope,
+    State, Subscription, WindowHandle, WindowId, WindowStateStore, state::required_state,
 };
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
@@ -16,6 +17,8 @@ pub struct Context<C: 'static> {
     window_state: WindowStateStore,
     app_events: AppEvents,
     window_id: WindowId,
+    app_handle: AppHandle,
+    window_handle: WindowHandle,
     spawn: Option<Rc<SpawnFn>>,
     pub(super) registry: OwnerRegistry,
     pub(super) owner: OwnerId,
@@ -30,6 +33,8 @@ impl<C: 'static> Clone for Context<C> {
             window_state: self.window_state.clone(),
             app_events: self.app_events.clone(),
             window_id: self.window_id,
+            app_handle: self.app_handle.clone(),
+            window_handle: self.window_handle.clone(),
             spawn: self.spawn.clone(),
             registry: self.registry.clone(),
             owner: self.owner,
@@ -72,6 +77,8 @@ impl<C: 'static> Context<C> {
             window_state,
             app_events,
             window_id,
+            app_handle: AppHandle::disconnected(),
+            window_handle: WindowHandle::disconnected(window_id),
             spawn: None,
             registry,
             owner,
@@ -112,6 +119,8 @@ impl<C: 'static> Context<C> {
             window_state,
             app_events,
             window_id,
+            app_handle: AppHandle::disconnected(),
+            window_handle: WindowHandle::disconnected(window_id),
             spawn: Some(Rc::new(spawn)),
             registry,
             owner,
@@ -156,7 +165,43 @@ impl<C: 'static> Context<C> {
             window_state,
             app_events,
             window_id,
+            app_handle: AppHandle::disconnected(),
+            window_handle: WindowHandle::disconnected(window_id),
             spawn: Some(Rc::new(move |future| owner_spawn(owner, future))),
+            registry,
+            owner,
+            owner_alive: Rc::new(Cell::new(true)),
+            marker: PhantomData,
+        }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_window_services(
+        app_state: AppStateStore,
+        window_state: WindowStateStore,
+        app_events: AppEvents,
+        app_handle: AppHandle,
+        window_handle: WindowHandle,
+        registry: OwnerRegistry,
+        spawner: &UiSpawner,
+    ) -> Self {
+        let window_id = window_handle.id();
+        let owner = registry.create_owner();
+        let owner_spawner = spawner.clone();
+        Self {
+            app_state,
+            window_state,
+            app_events,
+            window_id,
+            app_handle,
+            window_handle,
+            spawn: Some(Rc::new(move |future| {
+                if let Err(error) = owner_spawner.spawn(owner, future) {
+                    panic!("Context::spawn failed: {error}");
+                }
+            })),
             registry,
             owner,
             owner_alive: Rc::new(Cell::new(true)),
@@ -219,6 +264,18 @@ impl<C: 'static> Context<C> {
     #[must_use]
     pub const fn window_id(&self) -> WindowId {
         self.window_id
+    }
+
+    /// Returns a handle for application-level window operations.
+    #[must_use]
+    pub fn app(&self) -> AppHandle {
+        self.app_handle.clone()
+    }
+
+    /// Returns the stable native window that owns this component.
+    #[must_use]
+    pub fn window(&self) -> WindowHandle {
+        self.window_handle.clone()
     }
 
     /// Schedules an owner-bound local UI future.

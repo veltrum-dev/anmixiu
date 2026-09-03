@@ -4,6 +4,7 @@
 #[cfg(all(feature = "devtools", target_os = "macos"))]
 mod devtools;
 
+pub use anmixiu_core::Window;
 pub use anmixiu_platform_native::{
     BuiltFrame, DisplayCoordinator, FrameBuildError, FrameBuilder, PointerPhase, PointerTracker,
     Viewport,
@@ -15,9 +16,9 @@ pub(crate) use devtools::DevToolsAgent;
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
-pub use app::{App, AppError, Window};
+pub use app::{App, AppError};
 
 #[cfg(not(target_os = "macos"))]
 mod app_stub;
 #[cfg(not(target_os = "macos"))]
-pub use app_stub::{App, AppError, Window};
+pub use app_stub::{App, AppError};

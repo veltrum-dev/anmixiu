@@ -7,6 +7,7 @@ mod scheduler;
 mod shared_string;
 mod state;
 mod typography;
+mod window;
 
 pub use component::{ComponentHost, Context, Eventful, Render, RenderError, RenderOnce};
 pub use element::{
@@ -24,6 +25,11 @@ pub use scheduler::{FrameBatcher, FrameLoopError, WindowId};
 pub use shared_string::SharedString;
 pub use state::{AppStateStore, State, WindowStateStore};
 pub use typography::Typography;
+pub use window::{
+    AppHandle, ErasedComponentHost, MountedWindowRoot, PropertyUpdate, Window, WindowAction,
+    WindowDispatcher, WindowError, WindowHandle, WindowInfo, WindowMode, WindowMountContext,
+    WindowParts, WindowRoot, WindowSize, WindowStatus, WindowUpdate, WindowVisibility,
+};
 
 /// Well-known local endpoint used by the optional Anmixiu Dev Tools discovery agent.
 #[cfg(feature = "devtools")]

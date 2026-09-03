@@ -22,17 +22,19 @@ pub use anmixiu_core::*;
 pub use anmixiu_reactive::Signal;
 
 #[cfg(target_os = "macos")]
-pub use anmixiu_platform_macos::{App, AppError, Window};
+pub use anmixiu_platform_macos::{App, AppError};
 #[cfg(target_os = "windows")]
-pub use anmixiu_platform_windows::{App, AppError, Window};
+pub use anmixiu_platform_windows::{App, AppError};
 
 pub mod prelude {
     pub use crate::{
-        AlignItems, App, AppEvents, ButtonElement, Color, Context, CursorStyle, DivElement,
-        Element, ElementId, EventBindings, EventContext, EventPriority, EventScope, Eventful,
-        FlexDirection, FluentBuilder, GlobalElementId, InteractiveElement, IntoElement,
-        JustifyContent, ParentElement, Pixels, Render, RenderOnce, ScrollHandle, SharedString,
-        Signal, State, Stateful, StatefulInteractiveElement, Style, StyleRefinement, Styled,
-        Subscription, TextElement, Typography, Window, button, div, px, shared_format, text,
+        AlignItems, App, AppEvents, AppHandle, ButtonElement, Color, Context, CursorStyle,
+        DivElement, Element, ElementId, EventBindings, EventContext, EventPriority, EventScope,
+        Eventful, FlexDirection, FluentBuilder, GlobalElementId, InteractiveElement, IntoElement,
+        JustifyContent, ParentElement, Pixels, PropertyUpdate, Render, RenderOnce, ScrollHandle,
+        SharedString, Signal, State, Stateful, StatefulInteractiveElement, Style, StyleRefinement,
+        Styled, Subscription, TextElement, Typography, Window, WindowError, WindowHandle,
+        WindowInfo, WindowMode, WindowSize, WindowStatus, WindowUpdate, WindowVisibility, button,
+        div, px, shared_format, text,
     };
 }

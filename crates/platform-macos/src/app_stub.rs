@@ -1,5 +1,5 @@
 use anmixiu_core::{
-    AppEvents, AppStateStore, Eventful, Pixels, Render, Typography, WindowStateStore,
+    AppEvents, AppStateStore, Eventful, Pixels, Render, SharedString, Typography, Window,
 };
 use thiserror::Error;
 
@@ -11,53 +11,24 @@ pub enum AppError {
     UnsupportedPlatform,
 }
 
-#[derive(Default)]
-pub struct Window {
-    state: WindowStateStore,
-    typography: Typography,
-}
-
-impl Window {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn title(self, _title: impl Into<String>) -> Self {
-        self
-    }
-
-    #[must_use]
-    pub fn size(self, _width: f32, _height: f32) -> Self {
-        self
-    }
-
-    #[must_use]
-    pub fn with_state<T: 'static>(mut self, state: T) -> Self {
-        self.state = self.state.with(state);
-        self
-    }
-
-    #[must_use]
-    pub fn font_family(mut self, family: impl Into<anmixiu_core::SharedString>) -> Self {
-        self.typography = self.typography.with_font_family(family);
-        self
-    }
-
-    #[must_use]
-    pub fn font_size(mut self, size: impl Into<Pixels>) -> Self {
-        self.typography = self.typography.with_font_size(size);
-        self
-    }
-}
-
-#[derive(Default)]
 pub struct App {
+    name: SharedString,
     state: AppStateStore,
     window: Window,
     typography: Typography,
     events: AppEvents,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            name: SharedString::new_static("Anmixiu"),
+            state: AppStateStore::new(),
+            window: Window::new(),
+            typography: Typography::new(),
+            events: AppEvents::new(),
+        }
+    }
 }
 
 impl App {
@@ -69,6 +40,12 @@ impl App {
     #[must_use]
     pub fn with_state<T: 'static>(mut self, state: T) -> Self {
         self.state = self.state.with(state);
+        self
+    }
+
+    #[must_use]
+    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = name.into();
         self
     }
 

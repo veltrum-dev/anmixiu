@@ -1,18 +1,20 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use std::{
-    cell::{OnceCell, RefCell},
-    collections::HashSet,
+    cell::{Cell, OnceCell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
 
 use anmixiu_core::GlobalElementId;
 use anmixiu_core::{
-    AppEvents, AppStateStore, ComponentHost, Context, CursorStyle, EventBindings, Eventful, Pixels,
-    Render, Typography, WindowId, WindowStateStore,
+    AppEvents, AppHandle, AppStateStore, CursorStyle, ErasedComponentHost, Eventful, Pixels,
+    PropertyUpdate, Render, SharedString, Typography, Window, WindowAction, WindowDispatcher,
+    WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot,
+    WindowSize, WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility,
 };
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
 use anmixiu_render_metal::{FrameOutcome, MetalRenderer, RenderError, SurfaceSize};
@@ -51,12 +53,8 @@ const MAX_RENDER_INVALIDATIONS: usize = 8;
 const RUNAWAY_ANIMATION_WARN_FRAMES: u64 = 600;
 
 static MAIN_WAKE_QUEUED: AtomicBool = AtomicBool::new(false);
-static DISPLAY_QUEUED: AtomicBool = AtomicBool::new(false);
-
 thread_local! {
-    static ACTIVE_DRIVER: RefCell<Option<Rc<dyn NativeDriver>>> = RefCell::new(None);
-    static ACTIVE_VIEW: RefCell<Option<Retained<AnmixiuView>>> = const { RefCell::new(None) };
-    static LAUNCH_CONFIG: RefCell<Option<LaunchConfig>> = const { RefCell::new(None) };
+    static ACTIVE_APP: RefCell<Option<Rc<AppSession>>> = const { RefCell::new(None) };
 }
 
 // SAFETY: These signatures are the stable libdispatch C ABI. The callback is non-capturing,
@@ -68,9 +66,9 @@ unsafe extern "C" {
 
 extern "C" fn deliver_main_wake(_context: *mut c_void) {
     MAIN_WAKE_QUEUED.store(false, Ordering::Release);
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref() {
-            driver.wake();
+    ACTIVE_APP.with(|active| {
+        if let Some(session) = active.borrow().as_ref() {
+            session.wake();
         }
     });
 }
@@ -90,46 +88,11 @@ fn wake_appkit() {
     }
 }
 
-fn request_display() {
-    if DISPLAY_QUEUED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    // SAFETY: Same main-queue contract as wake_appkit; the callback ignores its null context.
-    unsafe {
-        dispatch_async_f(
-            std::ptr::addr_of!(_dispatch_main_q).cast_mut(),
-            std::ptr::null_mut(),
-            deliver_display,
-        );
-    }
-}
-
-extern "C" fn deliver_display(_context: *mut c_void) {
-    let scheduled = ACTIVE_VIEW.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .is_some_and(|view| view.resume_display_link())
-    });
-    if scheduled {
-        return;
-    }
-    DISPLAY_QUEUED.store(false, Ordering::Release);
-    sync_active_viewport();
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref() {
-            driver.draw();
+fn request_display(window_id: WindowId) {
+    ACTIVE_APP.with(|active| {
+        if let Some(session) = active.borrow().as_ref() {
+            session.request_display(window_id);
         }
-    });
-}
-
-fn sync_active_viewport() {
-    ACTIVE_VIEW.with(|active| {
-        let view = active.borrow();
-        let Some(view) = view.as_ref() else {
-            return;
-        };
-        with_driver_resize(view);
     });
 }
 
@@ -157,74 +120,12 @@ pub enum AppError {
     UiThread(String),
     #[error("component render failed: {0}")]
     Component(String),
-}
-
-pub struct Window {
-    title: String,
-    width: f32,
-    height: f32,
-    state: WindowStateStore,
-    typography: Typography,
-}
-
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            title: "Anmixiu".to_owned(),
-            width: 560.0,
-            height: 460.0,
-            state: WindowStateStore::new(),
-            typography: Typography::new(),
-        }
-    }
-}
-
-impl Window {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn title(mut self, title: impl Into<String>) -> Self {
-        self.title = title.into();
-        self
-    }
-
-    #[must_use]
-    /// Sets the initial logical window content size.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless both dimensions are finite and greater than zero.
-    pub fn size(mut self, width: f32, height: f32) -> Self {
-        assert!(width.is_finite() && width > 0.0);
-        assert!(height.is_finite() && height > 0.0);
-        self.width = width;
-        self.height = height;
-        self
-    }
-
-    #[must_use]
-    pub fn with_state<T: 'static>(mut self, state: T) -> Self {
-        self.state = self.state.with(state);
-        self
-    }
-
-    #[must_use]
-    pub fn font_family(mut self, family: impl Into<anmixiu_core::SharedString>) -> Self {
-        self.typography = self.typography.with_font_family(family);
-        self
-    }
-
-    #[must_use]
-    pub fn font_size(mut self, size: impl Into<Pixels>) -> Self {
-        self.typography = self.typography.with_font_size(size);
-        self
-    }
+    #[error(transparent)]
+    Window(#[from] WindowError),
 }
 
 pub struct App {
+    name: SharedString,
     state: AppStateStore,
     window: Window,
     typography: Typography,
@@ -234,6 +135,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            name: SharedString::new_static("Anmixiu"),
             state: AppStateStore::new(),
             window: Window::new(),
             typography: Typography::new(),
@@ -251,6 +153,13 @@ impl App {
     #[must_use]
     pub fn with_state<T: 'static>(mut self, state: T) -> Self {
         self.state = self.state.with(state);
+        self
+    }
+
+    /// Sets the application name inherited by windows without an explicit title.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -287,7 +196,7 @@ impl App {
     ///
     /// Returns startup, rendering, or guarded render-loop failures.
     pub fn run<C: Render>(self, root: C) -> Result<(), AppError> {
-        self.run_internal(root, None)
+        self.run_internal(WindowRoot::new(root))
     }
 
     /// Starts `AppKit` with the root Element's optional [`Eventful`] capability enabled.
@@ -299,38 +208,21 @@ impl App {
     ///
     /// Returns startup, rendering, or guarded render-loop failures.
     pub fn run_eventful<C: Render + Eventful>(self, root: C) -> Result<(), AppError> {
-        self.run_internal(root, Some(register_eventful::<C>))
+        self.run_internal(WindowRoot::new_eventful(root))
     }
 
-    fn run_internal<C: Render>(
-        self,
-        root: C,
-        event_registrar: Option<EventRegistrar<C>>,
-    ) -> Result<(), AppError> {
+    fn run_internal(self, root: WindowRoot) -> Result<(), AppError> {
         let mtm = MainThreadMarker::new().ok_or(AppError::NotMainThread)?;
-        let typography = self.window.typography.with_fallback(&self.typography);
-        let font = font_spec(&typography);
-        let driver = Rc::new(ComponentDriver::new_with_registrar(
-            root,
+        let session = Rc::new(AppSession::new(
+            self.name,
             self.state,
-            self.window.state,
-            self.window.title.as_str(),
-            font,
-            EventConfig {
-                app_events: self.events,
-                window_id: WindowId::new(1),
-                event_registrar,
-            },
+            self.events,
+            self.typography,
         )?);
-        ACTIVE_DRIVER.with(|active| {
-            active.replace(Some(driver.clone()));
-        });
-        LAUNCH_CONFIG.with(|config| {
-            config.replace(Some(LaunchConfig {
-                title: self.window.title,
-                width: self.window.width,
-                height: self.window.height,
-            }));
+        session.install_dispatcher();
+        let _initial_window = session.open_window(self.window, root)?;
+        ACTIVE_APP.with(|active| {
+            active.replace(Some(session.clone()));
         });
 
         let app = NSApplication::sharedApplication(mtm);
@@ -339,37 +231,607 @@ impl App {
         app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         app.run();
 
-        ACTIVE_VIEW.with(|active| {
+        ACTIVE_APP.with(|active| {
             active.take();
         });
-        ACTIVE_DRIVER.with(|active| {
-            active.take();
-        });
-        driver.shutdown();
-        driver.take_error().map_or(Ok(()), Err)
+        session.shutdown();
+        session.take_error().map_or(Ok(()), Err)
     }
 }
 
-type EventRegistrar<C> = fn(&C, &mut Context<C>, &mut EventBindings);
+const MAX_PENDING_WINDOW_COMMANDS: usize = 1_024;
 
-struct EventConfig<C: 'static> {
-    app_events: AppEvents,
-    window_id: WindowId,
-    event_registrar: Option<EventRegistrar<C>>,
+enum WindowCommand {
+    Open {
+        id: WindowId,
+        window: Window,
+        root: WindowRoot,
+        handle: WindowHandle,
+    },
+    Update {
+        id: WindowId,
+        update: WindowUpdate,
+    },
+    Action {
+        id: WindowId,
+        action: WindowAction,
+    },
 }
 
-fn register_eventful<C: Render + Eventful>(
-    root: &C,
-    cx: &mut Context<C>,
-    bindings: &mut EventBindings,
-) {
-    root.bind_events(cx, bindings);
+struct WindowEntry {
+    window: Retained<NSWindow>,
+    view: Retained<AnmixiuView>,
+    _delegate: Retained<WindowDelegate>,
+    driver: Rc<dyn NativeDriver>,
+    handle: WindowHandle,
 }
 
-struct LaunchConfig {
-    title: String,
-    width: f32,
-    height: f32,
+struct AppSession {
+    name: SharedString,
+    state: AppStateStore,
+    events: AppEvents,
+    typography: Typography,
+    runtime: Rc<AppRuntime>,
+    dispatcher: OnceCell<Weak<dyn WindowDispatcher>>,
+    next_window_id: Cell<u64>,
+    pending: RefCell<VecDeque<WindowCommand>>,
+    closed_windows: RefCell<VecDeque<WindowId>>,
+    draining: Cell<bool>,
+    windows: RefCell<HashMap<WindowId, WindowEntry>>,
+    handles: RefCell<HashMap<WindowId, WindowHandle>>,
+    active_window: Cell<Option<WindowId>>,
+    error: RefCell<Option<AppError>>,
+}
+
+impl AppSession {
+    fn new(
+        name: SharedString,
+        state: AppStateStore,
+        events: AppEvents,
+        typography: Typography,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            name,
+            state,
+            events,
+            typography,
+            runtime: Rc::new(AppRuntime::new(wake_appkit)?),
+            dispatcher: OnceCell::new(),
+            next_window_id: Cell::new(1),
+            pending: RefCell::new(VecDeque::new()),
+            closed_windows: RefCell::new(VecDeque::new()),
+            draining: Cell::new(false),
+            windows: RefCell::new(HashMap::new()),
+            handles: RefCell::new(HashMap::new()),
+            active_window: Cell::new(None),
+            error: RefCell::new(None),
+        })
+    }
+
+    fn install_dispatcher(self: &Rc<Self>) {
+        let dispatcher: Rc<dyn WindowDispatcher> = self.clone();
+        let installed = self.dispatcher.set(Rc::downgrade(&dispatcher));
+        debug_assert!(installed.is_ok(), "window dispatcher is installed once");
+    }
+
+    fn app_handle(&self) -> AppHandle {
+        self.dispatcher
+            .get()
+            .cloned()
+            .map_or_else(AppHandle::disconnected, AppHandle::new)
+    }
+
+    fn enqueue(&self, command: WindowCommand) -> Result<(), WindowError> {
+        let mut pending = self.pending.borrow_mut();
+        if pending.len() >= MAX_PENDING_WINDOW_COMMANDS {
+            return Err(WindowError::CommandQueueFull);
+        }
+        pending.push_back(command);
+        drop(pending);
+        wake_appkit();
+        Ok(())
+    }
+
+    fn wake(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            self.fail(AppError::NotMainThread);
+            return;
+        };
+        self.drain_closed_windows();
+        if let Err(error) = self.runtime.ui().run_ready() {
+            self.fail(AppError::UiThread(error.to_string()));
+            return;
+        }
+        self.drain_commands(mtm);
+        self.drain_closed_windows();
+        let drivers: Vec<_> = self
+            .windows
+            .borrow()
+            .iter()
+            .map(|(id, entry)| (*id, entry.driver.clone()))
+            .collect();
+        // `AppRuntime` is shared by every window, so it is drained once above. Driver wake only
+        // maps each window's dirty owner set to its own display link.
+        for (id, driver) in drivers {
+            if driver.is_dirty() {
+                self.request_display(id);
+            }
+        }
+        self.drain_commands(mtm);
+    }
+
+    fn drain_commands(&self, mtm: MainThreadMarker) {
+        if self.draining.replace(true) {
+            return;
+        }
+        let result = drain_reentrant_queue(&self.pending, |command| match command {
+            WindowCommand::Open {
+                id,
+                window,
+                root,
+                handle,
+            } => {
+                let result = self.open_native_window(mtm, id, window, root, &handle);
+                if result.is_err() {
+                    let mut info = handle.info();
+                    info.status = WindowStatus::Closed;
+                    handle.replace_info(info);
+                    self.handles.borrow_mut().remove(&id);
+                }
+                result
+            }
+            WindowCommand::Update { id, update } => self.apply_update(id, &update),
+            WindowCommand::Action { id, action } => self.apply_action(id, action),
+        });
+        self.draining.set(false);
+        if let Err(error) = result {
+            self.fail(error);
+        }
+    }
+
+    fn drain_commands_if_idle(&self, mtm: MainThreadMarker) {
+        if !self.draining.get() {
+            self.drain_commands(mtm);
+        }
+    }
+
+    fn open_native_window(
+        &self,
+        mtm: MainThreadMarker,
+        id: WindowId,
+        window: Window,
+        root: WindowRoot,
+        handle: &WindowHandle,
+    ) -> Result<(), AppError> {
+        let window = window.into_parts();
+        let title = window.title.unwrap_or_else(|| self.name.clone());
+        let typography = window.typography.with_fallback(&self.typography);
+        let driver: Rc<dyn NativeDriver> = Rc::new(ComponentDriver::new(
+            root,
+            self.state.clone(),
+            window.state,
+            title.as_str(),
+            font_spec(&typography),
+            self.events.clone(),
+            self.app_handle(),
+            handle.clone(),
+            self.runtime.clone(),
+        )?);
+        let content_size = window.content_size;
+        let frame = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(
+                f64::from(content_size.width().value()),
+                f64::from(content_size.height().value()),
+            ),
+        );
+        // SAFETY: The session retains the window and disables automatic release-on-close below.
+        let native_window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                frame,
+                NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::Closable
+                    | NSWindowStyleMask::Miniaturizable
+                    | NSWindowStyleMask::Resizable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: Required for an NSWindow retained by the Rust WindowEntry.
+        unsafe { native_window.setReleasedWhenClosed(false) };
+        native_window.setTitle(&NSString::from_str(title.as_str()));
+        native_window.setAcceptsMouseMovedEvents(true);
+        native_window.setCollectionBehavior(
+            NSWindowCollectionBehavior::MoveToActiveSpace
+                | NSWindowCollectionBehavior::FullScreenPrimary,
+        );
+        let delegate = WindowDelegate::new(mtm, id);
+        native_window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+        let view = AnmixiuView::new(mtm, frame, id);
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setWantsLayer(true);
+        view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
+        let layer = MetalLayer::new();
+        let raw_layer = std::ptr::from_ref::<metal::MetalLayerRef>(&layer)
+            .cast_mut()
+            .cast::<objc2::runtime::AnyObject>();
+        // SAFETY: MetalLayerRef addresses its CAMetalLayer object, retained by NSView.
+        unsafe {
+            let _: () = msg_send![&view, setLayer: raw_layer];
+        }
+        native_window.setContentView(Some(&view));
+        let _uses_display_link = view.install_display_link();
+        let viewport = viewport_for_view(&view);
+        driver.attach(viewport, layer);
+
+        self.windows.borrow_mut().insert(
+            id,
+            WindowEntry {
+                window: native_window.clone(),
+                view,
+                _delegate: delegate,
+                driver: driver.clone(),
+                handle: handle.clone(),
+            },
+        );
+        native_window.center();
+        native_window.makeKeyAndOrderFront(None);
+        self.active_window.set(Some(id));
+        handle.replace_info(WindowInfo {
+            id,
+            title,
+            content_size: WindowSize::new(viewport.logical_size().0, viewport.logical_size().1),
+            scale_factor: viewport.scale(),
+            focused: true,
+            visibility: WindowVisibility::Visible,
+            mode: WindowMode::Windowed,
+            status: WindowStatus::Open,
+        });
+        driver.draw();
+        self.request_display(id);
+        Ok(())
+    }
+
+    fn apply_update(&self, id: WindowId, update: &WindowUpdate) -> Result<(), AppError> {
+        let entry = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.window.clone(), entry.handle.clone()))
+            .ok_or(WindowError::Closed(id))?;
+        let (window, handle) = entry;
+        let next_title = match update.title_update() {
+            PropertyUpdate::Keep => None,
+            PropertyUpdate::Set(title) => {
+                window.setTitle(&NSString::from_str(title.as_str()));
+                Some(title.clone())
+            }
+            PropertyUpdate::Reset => {
+                window.setTitle(&NSString::from_str(self.name.as_str()));
+                Some(self.name.clone())
+            }
+        };
+        let next_size = match update.content_size_update() {
+            PropertyUpdate::Keep => None,
+            PropertyUpdate::Set(size) => {
+                window.setContentSize(NSSize::new(
+                    f64::from(size.width().value()),
+                    f64::from(size.height().value()),
+                ));
+                Some(*size)
+            }
+            PropertyUpdate::Reset => {
+                let size = WindowSize::default();
+                window.setContentSize(NSSize::new(
+                    f64::from(size.width().value()),
+                    f64::from(size.height().value()),
+                ));
+                Some(size)
+            }
+        };
+        let mut info = handle.info();
+        if let Some(title) = next_title {
+            info.title = title;
+        }
+        if let Some(size) = next_size {
+            info.content_size = size;
+        }
+        handle.replace_info(info);
+        self.sync_window_info(id);
+        Ok(())
+    }
+
+    fn apply_action(&self, id: WindowId, action: WindowAction) -> Result<(), AppError> {
+        let window = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| entry.window.clone())
+            .ok_or(WindowError::Closed(id))?;
+        match action {
+            WindowAction::Focus => window.makeKeyAndOrderFront(None),
+            WindowAction::Minimize => window.miniaturize(None),
+            WindowAction::Maximize => {
+                if !window.isZoomed() {
+                    window.zoom(None);
+                }
+            }
+            WindowAction::Restore => {
+                if window.isMiniaturized() {
+                    window.deminiaturize(None);
+                }
+                if window.isZoomed() {
+                    window.zoom(None);
+                }
+            }
+            WindowAction::Close => window.performClose(None),
+        }
+        self.sync_window_info(id);
+        Ok(())
+    }
+
+    fn request_display(&self, id: WindowId) {
+        let target = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.view.clone(), entry.driver.clone()));
+        let Some((view, driver)) = target else {
+            return;
+        };
+        view.queue_display();
+        if !view.resume_display_link() {
+            with_driver_resize(&view);
+            driver.draw();
+        }
+    }
+
+    fn sync_window_info(&self, id: WindowId) {
+        let snapshot = self.windows.borrow().get(&id).map(|entry| {
+            (
+                entry.window.clone(),
+                entry.view.clone(),
+                entry.handle.clone(),
+            )
+        });
+        let Some((window, view, handle)) = snapshot else {
+            return;
+        };
+        let viewport = viewport_for_view(&view);
+        let mut info = handle.info();
+        info.content_size = WindowSize::new(
+            viewport.logical_size().0.max(f32::EPSILON),
+            viewport.logical_size().1.max(f32::EPSILON),
+        );
+        info.scale_factor = viewport.scale();
+        info.focused = window.isKeyWindow();
+        info.visibility = if window.isMiniaturized() {
+            WindowVisibility::Minimized
+        } else if window.isVisible() {
+            WindowVisibility::Visible
+        } else {
+            WindowVisibility::Hidden
+        };
+        info.mode = if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            WindowMode::Fullscreen
+        } else if window.isZoomed() {
+            WindowMode::Maximized
+        } else {
+            WindowMode::Windowed
+        };
+        info.status = WindowStatus::Open;
+        handle.replace_info(info);
+    }
+
+    fn window_focused(&self, id: WindowId, focused: bool) {
+        if focused {
+            self.active_window.set(Some(id));
+        } else if self.active_window.get() == Some(id) {
+            self.active_window.set(None);
+        }
+        self.sync_window_info(id);
+        self.schedule_dirty_windows();
+    }
+
+    fn window_changed(&self, id: WindowId) {
+        let target = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.view.clone(), entry.driver.clone()));
+        if let Some((view, driver)) = target {
+            let viewport = viewport_for_view(&view);
+            driver.resize(viewport);
+            self.sync_window_info(id);
+            self.schedule_dirty_windows();
+        }
+    }
+
+    fn window_closed(&self, id: WindowId) {
+        let entry = self.windows.borrow_mut().remove(&id);
+        let Some(entry) = entry else {
+            return;
+        };
+        entry.driver.shutdown();
+        if let Some(error) = entry.driver.take_error() {
+            self.record_error(error);
+        }
+        let mut info = entry.handle.info();
+        info.status = WindowStatus::Closed;
+        info.visibility = WindowVisibility::Hidden;
+        info.focused = false;
+        entry.handle.replace_info(info);
+        self.handles.borrow_mut().remove(&id);
+        if self.active_window.get() == Some(id) {
+            self.active_window.set(None);
+        }
+        if self.windows.borrow().is_empty() && self.pending.borrow().is_empty() {
+            terminate_application();
+        }
+    }
+
+    fn defer_window_closed(&self, id: WindowId) {
+        self.closed_windows.borrow_mut().push_back(id);
+        wake_appkit();
+    }
+
+    fn drain_closed_windows(&self) {
+        loop {
+            let id = self.closed_windows.borrow_mut().pop_front();
+            let Some(id) = id else {
+                break;
+            };
+            self.window_closed(id);
+        }
+    }
+
+    fn schedule_dirty_windows(&self) {
+        let dirty: Vec<_> = self
+            .windows
+            .borrow()
+            .iter()
+            .filter_map(|(id, entry)| entry.driver.is_dirty().then_some(*id))
+            .collect();
+        for id in dirty {
+            self.request_display(id);
+        }
+    }
+
+    fn fail(&self, error: AppError) {
+        self.record_error(error);
+        terminate_application();
+    }
+
+    fn record_error(&self, error: AppError) {
+        let mut pending = self.error.borrow_mut();
+        if pending.is_none() {
+            eprintln!("Anmixiu stopped after an unrecoverable error: {error}");
+            *pending = Some(error);
+        }
+    }
+
+    fn take_error(&self) -> Option<AppError> {
+        self.error.borrow_mut().take()
+    }
+
+    fn shutdown(&self) {
+        let entries: Vec<_> = self
+            .windows
+            .borrow_mut()
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect();
+        for entry in entries {
+            entry.driver.shutdown();
+            if let Some(error) = entry.driver.take_error() {
+                self.record_error(error);
+            }
+            let mut info = entry.handle.info();
+            info.status = WindowStatus::Closed;
+            info.visibility = WindowVisibility::Hidden;
+            info.focused = false;
+            entry.handle.replace_info(info);
+        }
+        self.handles.borrow_mut().clear();
+        self.pending.borrow_mut().clear();
+        self.closed_windows.borrow_mut().clear();
+    }
+}
+
+fn drain_reentrant_queue<T, E>(
+    queue: &RefCell<VecDeque<T>>,
+    mut operation: impl FnMut(T) -> Result<(), E>,
+) -> Result<(), E> {
+    loop {
+        // Bind the result before invoking user/lifecycle work so the mutable queue borrow is gone.
+        let item = queue.borrow_mut().pop_front();
+        let Some(item) = item else {
+            return Ok(());
+        };
+        operation(item)?;
+    }
+}
+
+impl WindowDispatcher for AppSession {
+    fn open_window(&self, window: Window, root: WindowRoot) -> Result<WindowHandle, WindowError> {
+        if self.pending.borrow().len() >= MAX_PENDING_WINDOW_COMMANDS {
+            return Err(WindowError::CommandQueueFull);
+        }
+        let raw_id = self.next_window_id.get();
+        let next = raw_id.checked_add(1).ok_or(WindowError::IdExhausted)?;
+        let id = WindowId::new(raw_id);
+        let title = window
+            .requested_title()
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
+        let content_size = window.content_size();
+        let dispatcher = self
+            .dispatcher
+            .get()
+            .cloned()
+            .ok_or(WindowError::AppStopped)?;
+        let handle = WindowHandle::new(
+            id,
+            dispatcher,
+            WindowInfo {
+                id,
+                title,
+                content_size,
+                scale_factor: 1.0,
+                focused: false,
+                visibility: WindowVisibility::Hidden,
+                mode: WindowMode::Windowed,
+                status: WindowStatus::Opening,
+            },
+        );
+        self.enqueue(WindowCommand::Open {
+            id,
+            window,
+            root,
+            handle: handle.clone(),
+        })?;
+        self.next_window_id.set(next);
+        self.handles.borrow_mut().insert(id, handle.clone());
+        Ok(handle)
+    }
+
+    fn update_window(&self, id: WindowId, update: WindowUpdate) -> Result<(), WindowError> {
+        if !self.handles.borrow().contains_key(&id) {
+            return Err(WindowError::Closed(id));
+        }
+        self.enqueue(WindowCommand::Update { id, update })
+    }
+
+    fn window_action(&self, id: WindowId, action: WindowAction) -> Result<(), WindowError> {
+        if !self.handles.borrow().contains_key(&id) {
+            return Err(WindowError::Closed(id));
+        }
+        self.enqueue(WindowCommand::Action { id, action })?;
+        if action == WindowAction::Close
+            && let Some(handle) = self.handles.borrow().get(&id)
+        {
+            let mut info = handle.info();
+            info.status = WindowStatus::Closing;
+            handle.replace_info(info);
+        }
+        Ok(())
+    }
+
+    fn windows(&self) -> Vec<WindowHandle> {
+        let mut handles: Vec<_> = self.handles.borrow().values().cloned().collect();
+        handles.sort_by_key(WindowHandle::id);
+        handles
+    }
+
+    fn active_window(&self) -> Option<WindowHandle> {
+        let id = self.active_window.get()?;
+        self.handles.borrow().get(&id).cloned()
+    }
 }
 
 fn font_spec(typography: &Typography) -> FontSpec {
@@ -391,15 +853,19 @@ trait NativeDriver {
     fn pointer_down(&self, point: Point);
     fn pointer_up(&self, point: Point);
     fn scroll(&self, point: Point, delta_x: f32, delta_y: f32);
-    fn wake(&self);
     fn shutdown(&self);
+    fn is_dirty(&self) -> bool;
+    fn take_error(&self) -> Option<AppError>;
 }
 
-struct DriverState<C: Render> {
-    runtime: AppRuntime,
+struct DriverState {
+    window_id: WindowId,
+    runtime: Rc<AppRuntime>,
     owners: OwnerRegistry,
     owner: OwnerId,
-    host: ComponentHost<C>,
+    host: Box<dyn ErasedComponentHost>,
+    #[cfg(debug_assertions)]
+    root_type: &'static str,
     frame_builder: FrameBuilder,
     renderer: MetalRenderer,
     layer: Option<MetalLayer>,
@@ -422,7 +888,7 @@ struct DriverState<C: Render> {
     devtools_commands: tokio::sync::mpsc::Receiver<DevToolsCommand>,
 }
 
-impl<C: Render> DriverState<C> {
+impl DriverState {
     fn handle_frame_outcome(&mut self, outcome: FrameOutcome) -> bool {
         match outcome {
             FrameOutcome::Presented => {
@@ -444,53 +910,52 @@ impl<C: Render> DriverState<C> {
     }
 }
 
-struct ComponentDriver<C: Render> {
-    state: RefCell<DriverState<C>>,
+struct ComponentDriver {
+    state: RefCell<DriverState>,
 }
 
-impl<C: Render> ComponentDriver<C> {
-    fn new_with_registrar(
-        root: C,
+impl ComponentDriver {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        root: WindowRoot,
         app_state: AppStateStore,
         window_state: WindowStateStore,
         app_name: &str,
         font: FontSpec,
-        event_config: EventConfig<C>,
+        app_events: AppEvents,
+        app_handle: AppHandle,
+        window_handle: WindowHandle,
+        runtime: Rc<AppRuntime>,
     ) -> Result<Self, AppError> {
-        let runtime = AppRuntime::new(wake_appkit)?;
+        #[cfg(debug_assertions)]
+        let root_type = root.root_type();
+        let window_id = window_handle.id();
         #[cfg(feature = "devtools")]
         let (devtools, devtools_commands) =
-            DevToolsAgent::connect(runtime.tokio_handle(), app_name, request_display);
+            DevToolsAgent::connect(runtime.tokio_handle(), app_name, wake_appkit);
         #[cfg(not(feature = "devtools"))]
         let _ = app_name;
         let owners = OwnerRegistry::new();
         let spawner = runtime.ui().spawner(owners.clone());
-        let context = Context::with_owner_spawner_and_events(
+        let mounted = root.mount(WindowMountContext {
             app_state,
             window_state,
-            event_config.app_events,
-            event_config.window_id,
-            owners.clone(),
-            move |owner, future| {
-                if let Err(error) = spawner.spawn(owner, future) {
-                    panic!("Context::spawn failed: {error}");
-                }
-            },
-        );
-        let owner = context.owner_id();
+            app_events,
+            app_handle,
+            window_handle,
+            owners: owners.clone(),
+            spawner,
+        });
         let renderer = MetalRenderer::new()?.ok_or(AppError::MetalUnavailable)?;
-        let host = match event_config.event_registrar {
-            Some(registrar) => {
-                ComponentHost::new_with_event_registrar(Rc::new(root), context, registrar)
-            }
-            None => ComponentHost::new(Rc::new(root), context),
-        };
         Ok(Self {
             state: RefCell::new(DriverState {
+                window_id,
                 runtime,
                 owners,
-                owner,
-                host,
+                owner: mounted.owner,
+                host: mounted.host,
+                #[cfg(debug_assertions)]
+                root_type,
                 frame_builder: FrameBuilder::new_with_font(font)?,
                 renderer,
                 layer: None,
@@ -530,9 +995,14 @@ impl<C: Render> ComponentDriver<C> {
     }
 
     fn schedule_if_dirty(&self) {
-        if self.state.borrow().owners.dirty_len() != 0 {
-            request_display();
+        let state = self.state.borrow();
+        if state.owners.dirty_len() != 0 {
+            request_display(state.window_id);
         }
+    }
+
+    fn request_display(&self) {
+        request_display(self.state.borrow().window_id);
     }
 
     fn surface_size(viewport: Viewport) -> SurfaceSize {
@@ -546,7 +1016,7 @@ impl<C: Render> ComponentDriver<C> {
     /// the owner ids still animating so the culprit is identifiable.
     #[cfg(debug_assertions)]
     fn warn_on_runaway_animation(
-        state: &mut DriverState<C>,
+        state: &mut DriverState,
         animating: &[(OwnerId, &'static std::panic::Location<'static>)],
     ) {
         if animating.is_empty() {
@@ -562,7 +1032,7 @@ impl<C: Render> ComponentDriver<C> {
                 .map(|(owner, site)| format!("{owner:?} at {site}"))
                 .collect();
             tracing::warn!(
-                component = std::any::type_name::<C>(),
+                component = state.root_type,
                 call_sites = ?call_sites,
                 frames = state.animation_frame_streak,
                 "component has requested an animation frame every frame for a long time; \
@@ -572,7 +1042,7 @@ impl<C: Render> ComponentDriver<C> {
     }
 }
 
-impl<C: Render> NativeDriver for ComponentDriver<C> {
+impl NativeDriver for ComponentDriver {
     fn attach(&self, viewport: Viewport, layer: MetalLayer) {
         let mut state = self.state.borrow_mut();
         state.viewport = viewport;
@@ -613,11 +1083,6 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
                 state.needs_frame = true;
                 scrolling = true;
             }
-            let _report = state
-                .runtime
-                .ui()
-                .run_ready()
-                .map_err(|error| AppError::UiThread(error.to_string()))?;
             #[cfg(feature = "devtools")]
             let mut request_tree = false;
             #[cfg(feature = "devtools")]
@@ -776,10 +1241,10 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
             return;
         }
         if retry_surface_on_next_tick {
-            request_display();
+            self.request_display();
         }
         if scrolling {
-            request_display();
+            self.request_display();
         }
         self.schedule_if_dirty();
     }
@@ -804,7 +1269,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
             // that gets worse the faster the window is dragged.
             self.draw();
         } else {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -826,7 +1291,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -859,7 +1324,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -893,7 +1358,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if focus_changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -932,7 +1397,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         let dirty = state.owners.dirty_len() != 0;
         drop(state);
         if dirty {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -956,27 +1421,21 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if consumed {
-            request_display();
-        }
-    }
-
-    fn wake(&self) {
-        let dirty = {
-            let state = self.state.borrow();
-            if let Err(error) = state.runtime.ui().run_ready() {
-                drop(state);
-                self.fail(AppError::UiThread(error.to_string()));
-                return;
-            }
-            state.owners.dirty_len() != 0
-        };
-        if dirty {
-            request_display();
+            self.request_display();
         }
     }
 
     fn shutdown(&self) {
         self.state.borrow_mut().host.unmount();
+    }
+
+    fn is_dirty(&self) -> bool {
+        let state = self.state.borrow();
+        state.needs_frame || state.owners.dirty_len() != 0
+    }
+
+    fn take_error(&self) -> Option<AppError> {
+        ComponentDriver::take_error(self)
     }
 }
 
@@ -990,11 +1449,24 @@ enum ScrollAxisLock {
     Vertical,
 }
 
-#[derive(Default)]
 struct ViewIvars {
+    window_id: WindowId,
     tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
     display_link: RefCell<Option<Retained<CADisplayLink>>>,
-    scroll_axis_lock: std::cell::Cell<ScrollAxisLock>,
+    display_queued: Cell<bool>,
+    scroll_axis_lock: Cell<ScrollAxisLock>,
+}
+
+impl ViewIvars {
+    fn new(window_id: WindowId) -> Self {
+        Self {
+            window_id,
+            tracking_area: RefCell::new(None),
+            display_link: RefCell::new(None),
+            display_queued: Cell::new(false),
+            scroll_axis_lock: Cell::new(ScrollAxisLock::Free),
+        }
+    }
 }
 
 define_class!(
@@ -1024,21 +1496,18 @@ define_class!(
         // SAFETY: Signature matches -[NSView drawRect:].
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
-            request_display();
+            request_display(self.ivars().window_id);
         }
 
         // SAFETY: Signature matches the selector registered with CADisplayLink.
         #[unsafe(method(displayLinkTick:))]
         fn display_link_tick(&self, link: &CADisplayLink) {
-            sync_active_viewport();
-            if DISPLAY_QUEUED.swap(false, Ordering::AcqRel) {
-                ACTIVE_DRIVER.with(|active| {
-                    if let Some(driver) = active.borrow().as_ref() {
-                        driver.draw();
-                    }
-                });
+            with_driver_resize(self);
+            let window_id = self.ivars().window_id;
+            if self.ivars().display_queued.replace(false) {
+                with_driver(window_id, |driver| driver.draw());
             }
-            if !DISPLAY_QUEUED.load(Ordering::Acquire) {
+            if !self.ivars().display_queued.get() {
                 link.setPaused(true);
             }
         }
@@ -1047,33 +1516,29 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            with_driver_point(point, PointOperation::Move);
-            set_cursor_for_point(point);
+            with_driver_point(self.ivars().window_id, point, PointOperation::Move);
+            set_cursor_for_point(self.ivars().window_id, point);
         }
 
         // SAFETY: Signature matches -[NSResponder mouseExited:].
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
             NSCursor::arrowCursor().set();
-            ACTIVE_DRIVER.with(|active| {
-                if let Some(driver) = active.borrow().as_ref() {
-                    driver.pointer_exited();
-                }
-            });
+            with_driver(self.ivars().window_id, |driver| driver.pointer_exited());
         }
 
         // SAFETY: Signature matches -[NSResponder mouseDown:].
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            with_driver_point(point, PointOperation::Down);
+            with_driver_point(self.ivars().window_id, point, PointOperation::Down);
         }
 
         // SAFETY: Signature matches -[NSResponder mouseUp:].
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            with_driver_point(point, PointOperation::Up);
+            with_driver_point(self.ivars().window_id, point, PointOperation::Up);
         }
 
         // SAFETY: Signature matches -[NSResponder scrollWheel:].
@@ -1124,10 +1589,8 @@ define_class!(
                 delta_y = 0.0;
             }
             let point = Point::new(point.x as f32, point.y as f32);
-            ACTIVE_DRIVER.with(|active| {
-                if let Some(driver) = active.borrow().as_ref() {
-                    driver.scroll(point, -delta_x as f32, -delta_y as f32);
-                }
+            with_driver(self.ivars().window_id, |driver| {
+                driver.scroll(point, -delta_x as f32, -delta_y as f32);
             });
         }
 
@@ -1190,8 +1653,8 @@ define_class!(
 );
 
 impl AnmixiuView {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ViewIvars::default());
+    fn new(mtm: MainThreadMarker, frame: NSRect, window_id: WindowId) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ViewIvars::new(window_id));
         // SAFETY: initWithFrame: is NSView's designated initializer and `this` is freshly allocated.
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -1219,6 +1682,10 @@ impl AnmixiuView {
         link.setPaused(false);
         true
     }
+
+    fn queue_display(&self) {
+        self.ivars().display_queued.set(true);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1228,26 +1695,43 @@ enum PointOperation {
     Up,
 }
 
-fn with_driver_point(point: NSPoint, operation: PointOperation) {
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref() {
-            let point = Point::new(point.x as f32, point.y as f32);
-            match operation {
-                PointOperation::Move => driver.pointer_moved(point),
-                PointOperation::Down => driver.pointer_down(point),
-                PointOperation::Up => driver.pointer_up(point),
+fn with_driver(window_id: WindowId, operation: impl FnOnce(&Rc<dyn NativeDriver>)) {
+    let driver = ACTIVE_APP.with(|active| {
+        active.borrow().as_ref().and_then(|session| {
+            session
+                .windows
+                .borrow()
+                .get(&window_id)
+                .map(|entry| entry.driver.clone())
+        })
+    });
+    if let Some(driver) = driver {
+        operation(&driver);
+        with_app_session(|session| {
+            if let Some(mtm) = MainThreadMarker::new() {
+                session.drain_commands_if_idle(mtm);
             }
+            session.schedule_dirty_windows();
+        });
+    }
+}
+
+fn with_driver_point(window_id: WindowId, point: NSPoint, operation: PointOperation) {
+    with_driver(window_id, |driver| {
+        let point = Point::new(point.x as f32, point.y as f32);
+        match operation {
+            PointOperation::Move => driver.pointer_moved(point),
+            PointOperation::Down => driver.pointer_down(point),
+            PointOperation::Up => driver.pointer_up(point),
         }
     });
 }
 
-fn set_cursor_for_point(point: NSPoint) {
+fn set_cursor_for_point(window_id: WindowId, point: NSPoint) {
     let point = Point::new(point.x as f32, point.y as f32);
-    let style = ACTIVE_DRIVER.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .map_or(CursorStyle::Default, |driver| driver.cursor_style_at(point))
+    let mut style = CursorStyle::Default;
+    with_driver(window_id, |driver| {
+        style = driver.cursor_style_at(point);
     });
     match style {
         CursorStyle::Default => NSCursor::arrowCursor().set(),
@@ -1346,19 +1830,13 @@ fn viewport_for_view(view: &NSView) -> Viewport {
     )
 }
 
-fn with_driver_resize(view: &NSView) {
+fn with_driver_resize(view: &AnmixiuView) {
     let viewport = viewport_for_view(view);
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref() {
-            driver.resize(viewport);
-        }
-    });
+    with_driver(view.ivars().window_id, |driver| driver.resize(viewport));
 }
 
 #[derive(Debug, Default)]
-struct DelegateIvars {
-    window: OnceCell<Retained<NSWindow>>,
-}
+struct DelegateIvars;
 
 define_class!(
     // SAFETY: NSObject supports subclassing, AppDelegate has no Drop implementation, and the
@@ -1376,159 +1854,145 @@ define_class!(
         // SAFETY: Signature matches applicationDidFinishLaunching:.
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
-            let config = LAUNCH_CONFIG.with(|config| {
-                config
-                    .take()
-                    .expect("App::run installs launch configuration")
-            });
-            let frame = NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(f64::from(config.width), f64::from(config.height)),
-            );
-            // SAFETY: The window is retained by DelegateIvars and automatic release-on-close is
-            // disabled immediately below.
-            let window = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    NSWindow::alloc(self.mtm()),
-                    frame,
-                    NSWindowStyleMask::Titled
-                        | NSWindowStyleMask::Closable
-                        | NSWindowStyleMask::Miniaturizable
-                        | NSWindowStyleMask::Resizable,
-                    NSBackingStoreType::Buffered,
-                    false,
-                )
-            };
-            // SAFETY: Required for an NSWindow owned outside NSWindowController.
-            unsafe { window.setReleasedWhenClosed(false) };
-            window.setTitle(&NSString::from_str(&config.title));
-            window.setAcceptsMouseMovedEvents(true);
-            window.setCollectionBehavior(
-                NSWindowCollectionBehavior::MoveToActiveSpace
-                    | NSWindowCollectionBehavior::FullScreenPrimary,
-            );
-            window.setDelegate(Some(ProtocolObject::from_ref(self)));
-
-            let view = AnmixiuView::new(self.mtm(), frame);
-            view.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            view.setWantsLayer(true);
-            view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
-            let layer = MetalLayer::new();
-            let raw_layer = std::ptr::from_ref::<metal::MetalLayerRef>(&layer)
-                .cast_mut()
-                .cast::<objc2::runtime::AnyObject>();
-            // SAFETY: MetalLayerRef is a foreign-types borrowed wrapper whose address is the
-            // CAMetalLayer Objective-C object. NSView retains it through setLayer:.
-            unsafe {
-                let _: () = msg_send![&view, setLayer: raw_layer];
-            }
-            window.setContentView(Some(&view));
-            let _uses_display_link = view.install_display_link();
-            window.center();
-            window.makeKeyAndOrderFront(None);
-
-            let viewport = viewport_for_view(&view);
-            ACTIVE_DRIVER.with(|active| {
-                active
-                    .borrow()
-                    .as_ref()
-                    .expect("driver installed before AppKit starts")
-                    .attach(viewport, layer);
-            });
-            ACTIVE_VIEW.with(|active| {
-                active.replace(Some(view));
-            });
-            self.ivars()
-                .window
-                .set(window)
-                .expect("launch callback runs once");
-
             let app = NSApplication::sharedApplication(self.mtm());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             app.activate();
-            // Try the first frame synchronously after the view/layer are attached. The display link
-            // drives all later frames, but it may not enter the current run-loop mode until the
-            // next turn; relying on that first callback can leave a newly shown window blank.
-            ACTIVE_DRIVER.with(|active| {
-                if let Some(driver) = active.borrow().as_ref() {
-                    driver.draw();
+            ACTIVE_APP.with(|active| {
+                if let Some(session) = active.borrow().as_ref() {
+                    session.wake();
                 }
             });
-            request_display();
-        }
-    }
-
-    // SAFETY: NSWindowDelegate has no unsafe implementor invariants.
-    unsafe impl NSWindowDelegate for AppDelegate {
-        // SAFETY: Signature matches windowWillClose:.
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _notification: &NSNotification) {
-            ACTIVE_DRIVER.with(|active| {
-                if let Some(driver) = active.borrow().as_ref() {
-                    driver.shutdown();
-                }
-            });
-            NSApplication::sharedApplication(self.mtm()).terminate(None);
-        }
-
-        // SAFETY: Signature matches windowDidResize: and only forwards the current content-view
-        // geometry to the main-thread driver.
-        #[unsafe(method(windowDidResize:))]
-        fn window_did_resize(&self, _notification: &NSNotification) {
-            self.sync_driver_viewport();
-        }
-
-        // SAFETY: Signature matches windowDidEnterFullScreen: and only forwards the current
-        // content-view geometry to the main-thread driver.
-        #[unsafe(method(windowDidEnterFullScreen:))]
-        fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
-            self.sync_driver_viewport();
-        }
-
-        // SAFETY: Signature matches windowDidExitFullScreen: and only forwards the current
-        // content-view geometry to the main-thread driver.
-        #[unsafe(method(windowDidExitFullScreen:))]
-        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
-            self.sync_driver_viewport();
-        }
-
-        // SAFETY: Signature matches windowDidChangeBackingProperties: and keeps Retina scale in
-        // sync when a window moves between displays.
-        #[unsafe(method(windowDidChangeBackingProperties:))]
-        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
-            self.sync_driver_viewport();
         }
     }
 );
 
 impl AppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(DelegateIvars::default());
+        let this = Self::alloc(mtm).set_ivars(DelegateIvars);
         // SAFETY: NSObject's init signature is correct and `this` is freshly allocated.
         unsafe { msg_send![super(this), init] }
     }
+}
 
-    fn sync_driver_viewport(&self) {
-        let Some(window) = self.ivars().window.get() else {
-            return;
-        };
-        let Some(view) = window.contentView() else {
-            return;
-        };
-        with_driver_resize(&view);
+#[derive(Debug)]
+struct WindowDelegateIvars {
+    window_id: WindowId,
+}
+
+define_class!(
+    // SAFETY: NSObject supports subclassing, WindowDelegate has no Drop implementation, and each
+    // exported method below matches its NSWindowDelegate selector signature.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = WindowDelegateIvars]
+    struct WindowDelegate;
+
+    // SAFETY: NSObjectProtocol imposes no additional safety requirements.
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    // SAFETY: NSWindowDelegate has no unsafe implementor invariants.
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        // SAFETY: Signature matches windowWillClose: and routes by this delegate's immutable id.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            // Defer removal so the WindowEntry keeps this Objective-C delegate retained until the
+            // current callback has returned to AppKit.
+            with_app_session(|session| session.defer_window_closed(self.ivars().window_id));
+        }
+
+        // SAFETY: Signature matches windowDidBecomeKey:.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_focused(self.ivars().window_id, true));
+        }
+
+        // SAFETY: Signature matches windowDidResignKey:.
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_focused(self.ivars().window_id, false));
+        }
+
+        // SAFETY: Signature matches windowDidResize:.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
+
+        // SAFETY: Signature matches windowDidMiniaturize:.
+        #[unsafe(method(windowDidMiniaturize:))]
+        fn window_did_miniaturize(&self, _notification: &NSNotification) {
+            with_app_session(|session| {
+                session.sync_window_info(self.ivars().window_id);
+                session.schedule_dirty_windows();
+            });
+        }
+
+        // SAFETY: Signature matches windowDidDeminiaturize:.
+        #[unsafe(method(windowDidDeminiaturize:))]
+        fn window_did_deminiaturize(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
+
+        // SAFETY: Signature matches windowDidEnterFullScreen:.
+        #[unsafe(method(windowDidEnterFullScreen:))]
+        fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
+
+        // SAFETY: Signature matches windowDidExitFullScreen:.
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
+
+        // SAFETY: Signature matches windowDidChangeBackingProperties:.
+        #[unsafe(method(windowDidChangeBackingProperties:))]
+        fn window_did_change_backing_properties(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
     }
+);
+
+impl WindowDelegate {
+    fn new(mtm: MainThreadMarker, window_id: WindowId) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(WindowDelegateIvars { window_id });
+        // SAFETY: NSObject's init signature is correct and `this` is freshly allocated.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+fn with_app_session(operation: impl FnOnce(&AppSession)) {
+    ACTIVE_APP.with(|active| {
+        if let Some(session) = active.borrow().as_ref() {
+            operation(session);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         GuardDecision, MAX_RENDER_INVALIDATIONS, anonymous_self_invalidators,
-        evaluate_runaway_guard, take_drawable_retry_slot,
+        drain_reentrant_queue, evaluate_runaway_guard, take_drawable_retry_slot,
     };
     use anmixiu_reactive::OwnerRegistry;
+    use std::{cell::RefCell, collections::VecDeque};
+
+    #[test]
+    fn window_command_queue_releases_its_borrow_before_reentrant_enqueue() {
+        let queue = RefCell::new(VecDeque::from([1_u8]));
+        let mut seen = Vec::new();
+        drain_reentrant_queue(&queue, |command| {
+            seen.push(command);
+            if command == 1 {
+                queue.borrow_mut().push_back(2);
+            }
+            Ok::<_, ()>(())
+        })
+        .expect("infallible command drain");
+
+        assert_eq!(seen, vec![1, 2]);
+    }
 
     #[test]
     fn drawable_miss_gets_one_follow_up_turn_without_busy_looping() {

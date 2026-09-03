@@ -42,5 +42,9 @@ path = "../../examples/scroll.rs"
 name = "event"
 path = "../../examples/event.rs"
 
+[[example]]
+name = "multi_window"
+path = "../../examples/multi_window.rs"
+
 [lints]
 workspace = true

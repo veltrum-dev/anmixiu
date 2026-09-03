@@ -5,18 +5,21 @@
 )]
 
 use std::{
-    cell::RefCell,
-    collections::HashSet,
+    cell::{Cell, OnceCell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     mem::size_of,
-    rc::Rc,
-    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
+    rc::{Rc, Weak},
+    sync::atomic::{AtomicIsize, Ordering},
     time::Instant,
 };
 
 use anmixiu_core::{
-    AppEvents, AppStateStore, ComponentHost, Context, CursorStyle, EventBindings, Eventful,
-    GlobalElementId, Pixels, Render, Typography, WindowId, WindowStateStore,
+    AppEvents, AppHandle, AppStateStore, CursorStyle, ErasedComponentHost, Eventful,
+    GlobalElementId, Pixels, PropertyUpdate, Render, SharedString, Typography, Window,
+    WindowAction, WindowDispatcher, WindowError, WindowHandle, WindowId, WindowInfo, WindowMode,
+    WindowMountContext, WindowRoot, WindowSize, WindowStateStore, WindowStatus, WindowUpdate,
+    WindowVisibility,
 };
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
 use anmixiu_render_d3d11::{D3d11Renderer, FrameOutcome, RenderError, SurfaceSize};
@@ -44,11 +47,13 @@ use windows::{
                 CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, HTCLIENT, IDC_ARROW,
                 IDC_HAND, IDC_IBEAM, KillTimer, LoadCursorW, MSG, PostMessageW, PostQuitMessage,
-                RegisterClassExW, SIZE_MINIMIZED, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
-                SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
-                WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL,
-                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-                WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+                RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_MAXIMIZE, SW_MINIMIZE,
+                SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
+                SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+                TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
+                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+                WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER,
+                WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -66,12 +71,9 @@ const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 const SHIFT_BUTTON_MASK: usize = 0x0004;
 
 static ACTIVE_HWND: AtomicIsize = AtomicIsize::new(0);
-static FRAME_REQUEST_QUEUED: AtomicBool = AtomicBool::new(false);
-static FRAME_TIMER_ARMED: AtomicBool = AtomicBool::new(false);
-static MOUSE_LEAVE_TRACKED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static ACTIVE_DRIVER: RefCell<Option<Rc<dyn NativeDriver>>> = RefCell::new(None);
+    static ACTIVE_APP: RefCell<Option<Rc<AppSession>>> = const { RefCell::new(None) };
 }
 
 fn active_hwnd() -> Option<HWND> {
@@ -90,21 +92,8 @@ fn wake_win32() {
     }
 }
 
-fn request_display() {
-    if FRAME_REQUEST_QUEUED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let Some(hwnd) = active_hwnd() else {
-        FRAME_REQUEST_QUEUED.store(false, Ordering::Release);
-        return;
-    };
-    // SAFETY: The live HWND is used only to queue a private frame-request message.
-    if let Err(error) =
-        unsafe { PostMessageW(Some(hwnd), WM_ANMIXIU_REQUEST_FRAME, WPARAM(0), LPARAM(0)) }
-    {
-        FRAME_REQUEST_QUEUED.store(false, Ordering::Release);
-        report_win32_error("PostMessageW failed while requesting a frame", error);
-    }
+fn request_display(window_id: WindowId) {
+    with_app_session(|session| session.request_display(window_id));
 }
 
 #[derive(Debug, Error)]
@@ -123,74 +112,12 @@ pub enum AppError {
     UiThread(String),
     #[error("component render failed: {0}")]
     Component(String),
-}
-
-pub struct Window {
-    title: String,
-    width: f32,
-    height: f32,
-    state: WindowStateStore,
-    typography: Typography,
-}
-
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            title: "Anmixiu".to_owned(),
-            width: 560.0,
-            height: 460.0,
-            state: WindowStateStore::new(),
-            typography: Typography::new(),
-        }
-    }
-}
-
-impl Window {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn title(mut self, title: impl Into<String>) -> Self {
-        self.title = title.into();
-        self
-    }
-
-    #[must_use]
-    /// Sets the initial logical client-area size.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless both dimensions are finite and greater than zero.
-    pub fn size(mut self, width: f32, height: f32) -> Self {
-        assert!(width.is_finite() && width > 0.0);
-        assert!(height.is_finite() && height > 0.0);
-        self.width = width;
-        self.height = height;
-        self
-    }
-
-    #[must_use]
-    pub fn with_state<T: 'static>(mut self, state: T) -> Self {
-        self.state = self.state.with(state);
-        self
-    }
-
-    #[must_use]
-    pub fn font_family(mut self, family: impl Into<anmixiu_core::SharedString>) -> Self {
-        self.typography = self.typography.with_font_family(family);
-        self
-    }
-
-    #[must_use]
-    pub fn font_size(mut self, size: impl Into<Pixels>) -> Self {
-        self.typography = self.typography.with_font_size(size);
-        self
-    }
+    #[error(transparent)]
+    Window(#[from] WindowError),
 }
 
 pub struct App {
+    name: SharedString,
     state: AppStateStore,
     window: Window,
     typography: Typography,
@@ -200,6 +127,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            name: SharedString::new_static("Anmixiu"),
             state: AppStateStore::new(),
             window: Window::new(),
             typography: Typography::new(),
@@ -217,6 +145,13 @@ impl App {
     #[must_use]
     pub fn with_state<T: 'static>(mut self, state: T) -> Self {
         self.state = self.state.with(state);
+        self
+    }
+
+    /// Sets the application name inherited by windows without an explicit title.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -255,7 +190,7 @@ impl App {
     /// native frame cannot be built or presented, or when the component exceeds the guarded
     /// self-invalidation limit.
     pub fn run<C: Render>(self, root: C) -> Result<(), AppError> {
-        self.run_internal(root, None)
+        self.run_internal(WindowRoot::new(root))
     }
 
     /// Starts Win32 with the root Element's optional [`Eventful`] capability enabled.
@@ -266,14 +201,10 @@ impl App {
     ///
     /// Returns the same startup, rendering, and render-loop errors as [`run`](Self::run).
     pub fn run_eventful<C: Render + Eventful>(self, root: C) -> Result<(), AppError> {
-        self.run_internal(root, Some(register_eventful::<C>))
+        self.run_internal(WindowRoot::new_eventful(root))
     }
 
-    fn run_internal<C: Render>(
-        self,
-        root: C,
-        event_registrar: Option<EventRegistrar<C>>,
-    ) -> Result<(), AppError> {
+    fn run_internal(self, root: WindowRoot) -> Result<(), AppError> {
         // SAFETY: DPI awareness is selected before creating any HWND. ERROR_ACCESS_DENIED means a
         // manifest or the host process already selected awareness, so continuing is correct.
         let dpi_result =
@@ -283,78 +214,651 @@ impl App {
         {
             return Err(win32_error(error));
         }
-        let typography = self.window.typography.with_fallback(&self.typography);
-        let driver = Rc::new(ComponentDriver::new_with_registrar(
-            root,
+        let session = Rc::new(AppSession::new(
+            self.name,
             self.state,
-            self.window.state,
-            font_spec(&typography),
-            EventConfig {
-                app_events: self.events,
-                window_id: WindowId::new(1),
-                event_registrar,
-            },
+            self.events,
+            self.typography,
         )?);
-        ACTIVE_DRIVER.with(|active| {
-            active.replace(Some(driver.clone()));
+        session.install_dispatcher();
+        let _initial_window = session.open_window(self.window, root)?;
+        ACTIVE_APP.with(|active| {
+            active.replace(Some(session.clone()));
         });
-
-        let hwnd = match create_window(&self.window.title, self.window.width, self.window.height) {
-            Ok(hwnd) => hwnd,
-            Err(error) => {
-                ACTIVE_DRIVER.with(|active| {
-                    active.take();
-                });
-                return Err(error);
-            }
-        };
-        ACTIVE_HWND.store(hwnd.0 as isize, Ordering::Release);
-        let viewport = viewport_for_window(hwnd)?;
-        if let Err(error) = driver.attach(hwnd, viewport) {
-            // SAFETY: The HWND was created on this thread and has not yet been destroyed.
-            if let Err(cleanup_error) = unsafe { DestroyWindow(hwnd) } {
-                tracing::warn!(%cleanup_error, "failed to destroy the window after renderer initialization failed");
-            }
-            ACTIVE_HWND.store(0, Ordering::Release);
-            ACTIVE_DRIVER.with(|active| {
-                active.take();
-            });
-            return Err(error);
-        }
-        // SAFETY: The initialized top-level HWND is ready to be shown.
-        let _previously_visible = unsafe { ShowWindow(hwnd, SW_SHOW) };
-        driver.draw();
-        driver.wake();
-        request_display();
+        session.drain_commands();
+        session.take_error().map_or(Ok(()), Err)?;
 
         let message_result = run_message_loop();
-        driver.shutdown();
+        session.shutdown();
         ACTIVE_HWND.store(0, Ordering::Release);
-        ACTIVE_DRIVER.with(|active| {
+        ACTIVE_APP.with(|active| {
             active.take();
         });
-        FRAME_REQUEST_QUEUED.store(false, Ordering::Release);
-        FRAME_TIMER_ARMED.store(false, Ordering::Release);
-        MOUSE_LEAVE_TRACKED.store(false, Ordering::Release);
         message_result?;
-        driver.take_error().map_or(Ok(()), Err)
+        session.take_error().map_or(Ok(()), Err)
     }
 }
 
-type EventRegistrar<C> = fn(&C, &mut Context<C>, &mut EventBindings);
+const MAX_PENDING_WINDOW_COMMANDS: usize = 1_024;
 
-struct EventConfig<C: 'static> {
-    app_events: AppEvents,
-    window_id: WindowId,
-    event_registrar: Option<EventRegistrar<C>>,
+enum WindowCommand {
+    Open {
+        id: WindowId,
+        window: Window,
+        root: WindowRoot,
+        handle: WindowHandle,
+    },
+    Update {
+        id: WindowId,
+        update: WindowUpdate,
+    },
+    Action {
+        id: WindowId,
+        action: WindowAction,
+    },
 }
 
-fn register_eventful<C: Render + Eventful>(
-    root: &C,
-    cx: &mut Context<C>,
-    bindings: &mut EventBindings,
-) {
-    root.bind_events(cx, bindings);
+struct WindowEntry {
+    hwnd: HWND,
+    driver: Rc<dyn NativeDriver>,
+    handle: WindowHandle,
+    frame_request_queued: Cell<bool>,
+    frame_timer_armed: Cell<bool>,
+    mouse_leave_tracked: Cell<bool>,
+}
+
+struct AppSession {
+    name: SharedString,
+    state: AppStateStore,
+    events: AppEvents,
+    typography: Typography,
+    runtime: Rc<AppRuntime>,
+    dispatcher: OnceCell<Weak<dyn WindowDispatcher>>,
+    next_window_id: Cell<u64>,
+    pending: RefCell<VecDeque<WindowCommand>>,
+    draining: Cell<bool>,
+    windows: RefCell<HashMap<WindowId, WindowEntry>>,
+    ids_by_hwnd: RefCell<HashMap<isize, WindowId>>,
+    handles: RefCell<HashMap<WindowId, WindowHandle>>,
+    active_window: Cell<Option<WindowId>>,
+    error: RefCell<Option<AppError>>,
+}
+
+impl AppSession {
+    fn new(
+        name: SharedString,
+        state: AppStateStore,
+        events: AppEvents,
+        typography: Typography,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            name,
+            state,
+            events,
+            typography,
+            runtime: Rc::new(AppRuntime::new(wake_win32)?),
+            dispatcher: OnceCell::new(),
+            next_window_id: Cell::new(1),
+            pending: RefCell::new(VecDeque::new()),
+            draining: Cell::new(false),
+            windows: RefCell::new(HashMap::new()),
+            ids_by_hwnd: RefCell::new(HashMap::new()),
+            handles: RefCell::new(HashMap::new()),
+            active_window: Cell::new(None),
+            error: RefCell::new(None),
+        })
+    }
+
+    fn install_dispatcher(self: &Rc<Self>) {
+        let dispatcher: Rc<dyn WindowDispatcher> = self.clone();
+        let installed = self.dispatcher.set(Rc::downgrade(&dispatcher));
+        debug_assert!(installed.is_ok(), "window dispatcher is installed once");
+    }
+
+    fn app_handle(&self) -> AppHandle {
+        self.dispatcher
+            .get()
+            .cloned()
+            .map_or_else(AppHandle::disconnected, AppHandle::new)
+    }
+
+    fn enqueue(&self, command: WindowCommand) -> Result<(), WindowError> {
+        let mut pending = self.pending.borrow_mut();
+        if pending.len() >= MAX_PENDING_WINDOW_COMMANDS {
+            return Err(WindowError::CommandQueueFull);
+        }
+        pending.push_back(command);
+        drop(pending);
+        wake_win32();
+        Ok(())
+    }
+
+    fn wake(&self) {
+        if let Err(error) = self.runtime.ui().run_ready() {
+            self.fail(AppError::UiThread(error.to_string()));
+            return;
+        }
+        self.drain_commands();
+        let drivers: Vec<_> = self
+            .windows
+            .borrow()
+            .iter()
+            .map(|(id, entry)| (*id, entry.driver.clone()))
+            .collect();
+        // `AppRuntime` is shared by every window, so it is drained once above. Driver wake only
+        // maps each window's dirty owner set to its own frame request.
+        for (id, driver) in drivers {
+            if driver.is_dirty() {
+                self.request_display(id);
+            }
+        }
+        self.drain_commands();
+    }
+
+    fn drain_commands(&self) {
+        if self.draining.replace(true) {
+            return;
+        }
+        let result = drain_reentrant_queue(&self.pending, |command| match command {
+            WindowCommand::Open {
+                id,
+                window,
+                root,
+                handle,
+            } => {
+                let result = self.open_native_window(id, window, root, &handle);
+                if result.is_err() {
+                    let mut info = handle.info();
+                    info.status = WindowStatus::Closed;
+                    handle.replace_info(info);
+                    self.handles.borrow_mut().remove(&id);
+                }
+                result
+            }
+            WindowCommand::Update { id, update } => self.apply_update(id, &update),
+            WindowCommand::Action { id, action } => self.apply_action(id, action),
+        });
+        self.draining.set(false);
+        if let Err(error) = result {
+            self.fail(error);
+        }
+    }
+
+    fn drain_commands_if_idle(&self) {
+        if !self.draining.get() {
+            self.drain_commands();
+        }
+    }
+
+    fn open_native_window(
+        &self,
+        id: WindowId,
+        window: Window,
+        root: WindowRoot,
+        handle: &WindowHandle,
+    ) -> Result<(), AppError> {
+        let window = window.into_parts();
+        let title = window.title.unwrap_or_else(|| self.name.clone());
+        let typography = window.typography.with_fallback(&self.typography);
+        let driver: Rc<dyn NativeDriver> = Rc::new(ComponentDriver::new(
+            root,
+            self.state.clone(),
+            window.state,
+            font_spec(&typography),
+            self.events.clone(),
+            self.app_handle(),
+            handle.clone(),
+            self.runtime.clone(),
+        )?);
+        let content_size = window.content_size;
+        let hwnd = create_window(
+            title.as_str(),
+            content_size.width().value(),
+            content_size.height().value(),
+        )?;
+        let viewport = viewport_for_window(hwnd)?;
+        if let Err(error) = driver.attach(hwnd, viewport) {
+            // SAFETY: This HWND was created on the current UI thread and is not retained yet.
+            if let Err(cleanup_error) = unsafe { DestroyWindow(hwnd) } {
+                tracing::warn!(%cleanup_error, "failed to destroy window after renderer initialization failed");
+            }
+            return Err(error);
+        }
+        self.ids_by_hwnd.borrow_mut().insert(hwnd.0 as isize, id);
+        self.windows.borrow_mut().insert(
+            id,
+            WindowEntry {
+                hwnd,
+                driver: driver.clone(),
+                handle: handle.clone(),
+                frame_request_queued: Cell::new(false),
+                frame_timer_armed: Cell::new(false),
+                mouse_leave_tracked: Cell::new(false),
+            },
+        );
+        if ACTIVE_HWND.load(Ordering::Acquire) == 0 {
+            ACTIVE_HWND.store(hwnd.0 as isize, Ordering::Release);
+        }
+        // SAFETY: The fully attached top-level HWND is ready to be shown.
+        let _previously_visible = unsafe { ShowWindow(hwnd, SW_SHOW) };
+        self.active_window.set(Some(id));
+        handle.replace_info(WindowInfo {
+            id,
+            title,
+            content_size: WindowSize::new(viewport.logical_size().0, viewport.logical_size().1),
+            scale_factor: viewport.scale(),
+            focused: true,
+            visibility: WindowVisibility::Visible,
+            mode: WindowMode::Windowed,
+            status: WindowStatus::Open,
+        });
+        driver.draw();
+        self.request_display(id);
+        Ok(())
+    }
+
+    fn apply_update(&self, id: WindowId, update: &WindowUpdate) -> Result<(), AppError> {
+        let (hwnd, handle) = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.hwnd, entry.handle.clone()))
+            .ok_or(WindowError::Closed(id))?;
+        let next_title = match update.title_update() {
+            PropertyUpdate::Keep => None,
+            PropertyUpdate::Set(title) => {
+                set_window_title(hwnd, title.as_str())?;
+                Some(title.clone())
+            }
+            PropertyUpdate::Reset => {
+                set_window_title(hwnd, self.name.as_str())?;
+                Some(self.name.clone())
+            }
+        };
+        let next_size = match update.content_size_update() {
+            PropertyUpdate::Keep => None,
+            PropertyUpdate::Set(size) => {
+                set_window_content_size(hwnd, *size)?;
+                Some(*size)
+            }
+            PropertyUpdate::Reset => {
+                let size = WindowSize::default();
+                set_window_content_size(hwnd, size)?;
+                Some(size)
+            }
+        };
+        let mut info = handle.info();
+        if let Some(title) = next_title {
+            info.title = title;
+        }
+        if let Some(size) = next_size {
+            info.content_size = size;
+        }
+        handle.replace_info(info);
+        self.schedule_dirty_windows();
+        self.sync_window_info(id);
+        Ok(())
+    }
+
+    fn apply_action(&self, id: WindowId, action: WindowAction) -> Result<(), AppError> {
+        let hwnd = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| entry.hwnd)
+            .ok_or(WindowError::Closed(id))?;
+        match action {
+            WindowAction::Focus => {
+                // SAFETY: Requests activation for this live top-level HWND.
+                let _focused = unsafe { SetForegroundWindow(hwnd) };
+            }
+            WindowAction::Minimize => {
+                // SAFETY: Changes show state for this live top-level HWND.
+                let _previous = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+            }
+            WindowAction::Maximize => {
+                // SAFETY: Changes show state for this live top-level HWND.
+                let _previous = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+            }
+            WindowAction::Restore => {
+                // SAFETY: Changes show state for this live top-level HWND.
+                let _previous = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            }
+            WindowAction::Close => {
+                // SAFETY: Queues an ordinary close request for this live HWND.
+                unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                    .map_err(win32_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn request_display(&self, id: WindowId) {
+        let hwnd = {
+            let windows = self.windows.borrow();
+            let Some(entry) = windows.get(&id) else {
+                return;
+            };
+            if entry.frame_request_queued.replace(true) {
+                return;
+            }
+            entry.hwnd
+        };
+        // SAFETY: Queues a private frame request for this live HWND.
+        if let Err(error) =
+            unsafe { PostMessageW(Some(hwnd), WM_ANMIXIU_REQUEST_FRAME, WPARAM(0), LPARAM(0)) }
+        {
+            if let Some(entry) = self.windows.borrow().get(&id) {
+                entry.frame_request_queued.set(false);
+            }
+            self.fail(win32_error(error));
+        }
+    }
+
+    fn id_for_hwnd(&self, hwnd: HWND) -> Option<WindowId> {
+        self.ids_by_hwnd.borrow().get(&(hwnd.0 as isize)).copied()
+    }
+
+    fn driver_for_hwnd(&self, hwnd: HWND) -> Option<Rc<dyn NativeDriver>> {
+        let id = self.id_for_hwnd(hwnd)?;
+        self.windows
+            .borrow()
+            .get(&id)
+            .map(|entry| entry.driver.clone())
+    }
+
+    fn frame_request_delivered(&self, hwnd: HWND) {
+        if let Some(id) = self.id_for_hwnd(hwnd)
+            && let Some(entry) = self.windows.borrow().get(&id)
+        {
+            entry.frame_request_queued.set(false);
+        }
+    }
+
+    fn arm_frame_timer(&self, hwnd: HWND) -> bool {
+        let Some(id) = self.id_for_hwnd(hwnd) else {
+            return false;
+        };
+        let windows = self.windows.borrow();
+        let Some(entry) = windows.get(&id) else {
+            return false;
+        };
+        !entry.frame_timer_armed.replace(true)
+    }
+
+    fn frame_timer_fired(&self, hwnd: HWND) {
+        if let Some(id) = self.id_for_hwnd(hwnd)
+            && let Some(entry) = self.windows.borrow().get(&id)
+        {
+            entry.frame_timer_armed.set(false);
+        }
+    }
+
+    fn begin_mouse_tracking(&self, hwnd: HWND) -> bool {
+        let Some(id) = self.id_for_hwnd(hwnd) else {
+            return false;
+        };
+        let windows = self.windows.borrow();
+        let Some(entry) = windows.get(&id) else {
+            return false;
+        };
+        !entry.mouse_leave_tracked.replace(true)
+    }
+
+    fn end_mouse_tracking(&self, hwnd: HWND) {
+        if let Some(id) = self.id_for_hwnd(hwnd)
+            && let Some(entry) = self.windows.borrow().get(&id)
+        {
+            entry.mouse_leave_tracked.set(false);
+        }
+    }
+
+    fn window_resized(&self, hwnd: HWND, size_state: usize) {
+        let Some(id) = self.id_for_hwnd(hwnd) else {
+            return;
+        };
+        let Some((driver, handle)) = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.driver.clone(), entry.handle.clone()))
+        else {
+            return;
+        };
+        let mut info = handle.info();
+        info.visibility = if size_state as u32 == SIZE_MINIMIZED {
+            WindowVisibility::Minimized
+        } else {
+            WindowVisibility::Visible
+        };
+        info.mode = if size_state as u32 == SIZE_MAXIMIZED {
+            WindowMode::Maximized
+        } else {
+            WindowMode::Windowed
+        };
+        if info.visibility != WindowVisibility::Minimized
+            && let Ok(viewport) = viewport_for_window(hwnd)
+        {
+            info.content_size =
+                WindowSize::new(viewport.logical_size().0, viewport.logical_size().1);
+            info.scale_factor = viewport.scale();
+            driver.resize(viewport);
+        }
+        handle.replace_info(info);
+        self.schedule_dirty_windows();
+    }
+
+    fn window_focused(&self, hwnd: HWND, focused: bool) {
+        let Some(id) = self.id_for_hwnd(hwnd) else {
+            return;
+        };
+        if focused {
+            self.active_window.set(Some(id));
+        } else if self.active_window.get() == Some(id) {
+            self.active_window.set(None);
+        }
+        if let Some(handle) = self.handles.borrow().get(&id) {
+            let mut info = handle.info();
+            info.focused = focused;
+            handle.replace_info(info);
+        }
+        self.schedule_dirty_windows();
+    }
+
+    fn sync_window_info(&self, id: WindowId) {
+        let Some((hwnd, handle)) = self
+            .windows
+            .borrow()
+            .get(&id)
+            .map(|entry| (entry.hwnd, entry.handle.clone()))
+        else {
+            return;
+        };
+        if let Ok(viewport) = viewport_for_window(hwnd) {
+            let mut info = handle.info();
+            info.content_size =
+                WindowSize::new(viewport.logical_size().0, viewport.logical_size().1);
+            info.scale_factor = viewport.scale();
+            info.status = WindowStatus::Open;
+            handle.replace_info(info);
+        }
+    }
+
+    fn window_destroyed(&self, hwnd: HWND) {
+        let Some(id) = self.ids_by_hwnd.borrow_mut().remove(&(hwnd.0 as isize)) else {
+            return;
+        };
+        let entry = self.windows.borrow_mut().remove(&id);
+        let Some(entry) = entry else {
+            return;
+        };
+        entry.driver.shutdown();
+        if let Some(error) = entry.driver.take_error() {
+            self.record_error(error);
+        }
+        let mut info = entry.handle.info();
+        info.status = WindowStatus::Closed;
+        info.visibility = WindowVisibility::Hidden;
+        info.focused = false;
+        entry.handle.replace_info(info);
+        self.handles.borrow_mut().remove(&id);
+        if self.active_window.get() == Some(id) {
+            self.active_window.set(None);
+        }
+        if self.windows.borrow().is_empty() && !self.pending.borrow().is_empty() {
+            self.drain_commands();
+        }
+        let next_hwnd = self
+            .windows
+            .borrow()
+            .values()
+            .next()
+            .map(|entry| entry.hwnd);
+        if let Some(next_hwnd) = next_hwnd {
+            ACTIVE_HWND.store(next_hwnd.0 as isize, Ordering::Release);
+        } else {
+            ACTIVE_HWND.store(0, Ordering::Release);
+            // SAFETY: The last live top-level window on this UI thread has closed.
+            unsafe { PostQuitMessage(0) };
+        }
+    }
+
+    fn schedule_dirty_windows(&self) {
+        let dirty: Vec<_> = self
+            .windows
+            .borrow()
+            .iter()
+            .filter_map(|(id, entry)| entry.driver.is_dirty().then_some(*id))
+            .collect();
+        for id in dirty {
+            self.request_display(id);
+        }
+    }
+
+    fn fail(&self, error: AppError) {
+        self.record_error(error);
+        // SAFETY: Failures reach this boundary on the HWND-owning UI thread.
+        unsafe { PostQuitMessage(1) };
+    }
+
+    fn record_error(&self, error: AppError) {
+        let mut pending = self.error.borrow_mut();
+        if pending.is_none() {
+            eprintln!("Anmixiu stopped after an unrecoverable error: {error}");
+            *pending = Some(error);
+        }
+    }
+
+    fn take_error(&self) -> Option<AppError> {
+        self.error.borrow_mut().take()
+    }
+
+    fn shutdown(&self) {
+        let windows: Vec<_> = self
+            .windows
+            .borrow()
+            .values()
+            .map(|entry| entry.hwnd)
+            .collect();
+        for hwnd in windows {
+            // SAFETY: Each HWND belongs to this UI thread and is still registered as live.
+            if let Err(error) = unsafe { DestroyWindow(hwnd) } {
+                self.record_error(win32_error(error));
+            }
+        }
+        self.pending.borrow_mut().clear();
+    }
+}
+
+fn drain_reentrant_queue<T, E>(
+    queue: &RefCell<VecDeque<T>>,
+    mut operation: impl FnMut(T) -> Result<(), E>,
+) -> Result<(), E> {
+    loop {
+        // Bind the result before invoking user/lifecycle work so the mutable queue borrow is gone.
+        let item = queue.borrow_mut().pop_front();
+        let Some(item) = item else {
+            return Ok(());
+        };
+        operation(item)?;
+    }
+}
+
+impl WindowDispatcher for AppSession {
+    fn open_window(&self, window: Window, root: WindowRoot) -> Result<WindowHandle, WindowError> {
+        if self.pending.borrow().len() >= MAX_PENDING_WINDOW_COMMANDS {
+            return Err(WindowError::CommandQueueFull);
+        }
+        let raw_id = self.next_window_id.get();
+        let next = raw_id.checked_add(1).ok_or(WindowError::IdExhausted)?;
+        let id = WindowId::new(raw_id);
+        let title = window
+            .requested_title()
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
+        let content_size = window.content_size();
+        let dispatcher = self
+            .dispatcher
+            .get()
+            .cloned()
+            .ok_or(WindowError::AppStopped)?;
+        let handle = WindowHandle::new(
+            id,
+            dispatcher,
+            WindowInfo {
+                id,
+                title,
+                content_size,
+                scale_factor: 1.0,
+                focused: false,
+                visibility: WindowVisibility::Hidden,
+                mode: WindowMode::Windowed,
+                status: WindowStatus::Opening,
+            },
+        );
+        self.enqueue(WindowCommand::Open {
+            id,
+            window,
+            root,
+            handle: handle.clone(),
+        })?;
+        self.next_window_id.set(next);
+        self.handles.borrow_mut().insert(id, handle.clone());
+        Ok(handle)
+    }
+
+    fn update_window(&self, id: WindowId, update: WindowUpdate) -> Result<(), WindowError> {
+        if !self.handles.borrow().contains_key(&id) {
+            return Err(WindowError::Closed(id));
+        }
+        self.enqueue(WindowCommand::Update { id, update })
+    }
+
+    fn window_action(&self, id: WindowId, action: WindowAction) -> Result<(), WindowError> {
+        if !self.handles.borrow().contains_key(&id) {
+            return Err(WindowError::Closed(id));
+        }
+        self.enqueue(WindowCommand::Action { id, action })?;
+        if action == WindowAction::Close
+            && let Some(handle) = self.handles.borrow().get(&id)
+        {
+            let mut info = handle.info();
+            info.status = WindowStatus::Closing;
+            handle.replace_info(info);
+        }
+        Ok(())
+    }
+
+    fn windows(&self) -> Vec<WindowHandle> {
+        let mut handles: Vec<_> = self.handles.borrow().values().cloned().collect();
+        handles.sort_by_key(WindowHandle::id);
+        handles
+    }
+
+    fn active_window(&self) -> Option<WindowHandle> {
+        let id = self.active_window.get()?;
+        self.handles.borrow().get(&id).cloned()
+    }
 }
 
 fn font_spec(typography: &Typography) -> FontSpec {
@@ -379,16 +883,17 @@ trait NativeDriver {
     fn pointer_up(&self, point: Point);
     fn scroll(&self, point: Point, delta_x: f32, delta_y: f32);
     fn system_settings_changed(&self);
-    fn wake(&self);
     fn shutdown(&self);
-    fn fail_win32(&self, operation: &'static str, error: windows::core::Error);
+    fn is_dirty(&self) -> bool;
+    fn take_error(&self) -> Option<AppError>;
 }
 
-struct DriverState<C: Render> {
-    runtime: AppRuntime,
+struct DriverState {
+    window_id: WindowId,
+    runtime: Rc<AppRuntime>,
     owners: OwnerRegistry,
     owner: OwnerId,
-    host: ComponentHost<C>,
+    host: Box<dyn ErasedComponentHost>,
     frame_builder: FrameBuilder,
     renderer: Option<D3d11Renderer>,
     viewport: Viewport,
@@ -402,46 +907,41 @@ struct DriverState<C: Render> {
     error: Option<AppError>,
 }
 
-struct ComponentDriver<C: Render> {
-    state: RefCell<DriverState<C>>,
+struct ComponentDriver {
+    state: RefCell<DriverState>,
 }
 
-impl<C: Render> ComponentDriver<C> {
-    fn new_with_registrar(
-        root: C,
+impl ComponentDriver {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        root: WindowRoot,
         app_state: AppStateStore,
         window_state: WindowStateStore,
         font: FontSpec,
-        event_config: EventConfig<C>,
+        app_events: AppEvents,
+        app_handle: AppHandle,
+        window_handle: WindowHandle,
+        runtime: Rc<AppRuntime>,
     ) -> Result<Self, AppError> {
-        let runtime = AppRuntime::new(wake_win32)?;
+        let window_id = window_handle.id();
         let owners = OwnerRegistry::new();
         let spawner = runtime.ui().spawner(owners.clone());
-        let context = Context::with_owner_spawner_and_events(
+        let mounted = root.mount(WindowMountContext {
             app_state,
             window_state,
-            event_config.app_events,
-            event_config.window_id,
-            owners.clone(),
-            move |owner, future| {
-                if let Err(error) = spawner.spawn(owner, future) {
-                    panic!("Context::spawn failed: {error}");
-                }
-            },
-        );
-        let owner = context.owner_id();
-        let host = match event_config.event_registrar {
-            Some(registrar) => {
-                ComponentHost::new_with_event_registrar(Rc::new(root), context, registrar)
-            }
-            None => ComponentHost::new(Rc::new(root), context),
-        };
+            app_events,
+            app_handle,
+            window_handle,
+            owners: owners.clone(),
+            spawner,
+        });
         Ok(Self {
             state: RefCell::new(DriverState {
+                window_id,
                 runtime,
                 owners,
-                owner,
-                host,
+                owner: mounted.owner,
+                host: mounted.host,
                 frame_builder: FrameBuilder::new_with_font(font)?,
                 renderer: None,
                 viewport: Viewport::new(1.0, 1.0, 1.0),
@@ -476,9 +976,13 @@ impl<C: Render> ComponentDriver<C> {
         let (width, height) = viewport.physical_size();
         SurfaceSize::new(width.max(1), height.max(1)).expect("clamped dimensions are non-zero")
     }
+
+    fn request_display(&self) {
+        request_display(self.state.borrow().window_id);
+    }
 }
 
-impl<C: Render> NativeDriver for ComponentDriver<C> {
+impl NativeDriver for ComponentDriver {
     fn attach(&self, hwnd: HWND, viewport: Viewport) -> Result<(), AppError> {
         let renderer = D3d11Renderer::new(hwnd, Self::surface_size(viewport), viewport.scale())?;
         let mut state = self.state.borrow_mut();
@@ -501,7 +1005,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
             Ok(changed)
         })();
         match refresh {
-            Ok(true) => request_display(),
+            Ok(true) => self.request_display(),
             Ok(false) => {}
             Err(error) => self.fail(error.into()),
         }
@@ -531,11 +1035,6 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
                 state.needs_frame = true;
                 needs_follow_up = true;
             }
-            state
-                .runtime
-                .ui()
-                .run_ready()
-                .map_err(|error| AppError::UiThread(error.to_string()))?;
             let dirty = state.owners.take_dirty();
             for owner in &dirty {
                 if state.stalled.remove(owner) {
@@ -635,7 +1134,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
             return;
         }
         if needs_follow_up {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -682,7 +1181,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -719,7 +1218,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -753,7 +1252,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if focus_changed {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -792,7 +1291,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         let dirty = state.owners.dirty_len() != 0;
         drop(state);
         if dirty {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -810,22 +1309,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         }
         drop(state);
         if consumed {
-            request_display();
-        }
-    }
-
-    fn wake(&self) {
-        let dirty = {
-            let state = self.state.borrow();
-            if let Err(error) = state.runtime.ui().run_ready() {
-                drop(state);
-                self.fail(AppError::UiThread(error.to_string()));
-                return;
-            }
-            state.owners.dirty_len() != 0
-        };
-        if dirty {
-            request_display();
+            self.request_display();
         }
     }
 
@@ -833,8 +1317,13 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         self.state.borrow_mut().host.unmount();
     }
 
-    fn fail_win32(&self, operation: &'static str, error: windows::core::Error) {
-        self.fail(AppError::Win32(format!("{operation}: {error}")));
+    fn is_dirty(&self) -> bool {
+        let state = self.state.borrow();
+        state.needs_frame || state.owners.dirty_len() != 0
+    }
+
+    fn take_error(&self) -> Option<AppError> {
+        ComponentDriver::take_error(self)
     }
 }
 
@@ -906,6 +1395,48 @@ fn create_window(title: &str, logical_width: f32, logical_height: f32) -> Result
     .map_err(win32_error)
 }
 
+fn set_window_title(hwnd: HWND, title: &str) -> Result<(), AppError> {
+    let title = wide_null(title);
+    // SAFETY: The title is nul-terminated and HWND identifies a live window owned by this thread.
+    unsafe { SetWindowTextW(hwnd, PCWSTR(title.as_ptr())) }.map_err(win32_error)
+}
+
+fn set_window_content_size(hwnd: HWND, size: WindowSize) -> Result<(), AppError> {
+    // SAFETY: GetDpiForWindow reads the scale assigned to this live HWND.
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let scale = dpi as f32 / 96.0;
+    let mut outer = RECT {
+        left: 0,
+        top: 0,
+        right: (size.width().value() * scale).round() as i32,
+        bottom: (size.height().value() * scale).round() as i32,
+    };
+    // SAFETY: `outer` is writable and styles match this top-level window.
+    unsafe {
+        AdjustWindowRectExForDpi(
+            &raw mut outer,
+            WS_OVERLAPPEDWINDOW,
+            false,
+            WINDOW_EX_STYLE::default(),
+            dpi,
+        )
+    }
+    .map_err(win32_error)?;
+    // SAFETY: Updates only the size of this live HWND and preserves its position and z-order.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            outer.right - outer.left,
+            outer.bottom - outer.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .map_err(win32_error)
+}
+
 fn run_message_loop() -> Result<(), AppError> {
     let mut message = MSG::default();
     loop {
@@ -936,22 +1467,23 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_ANMIXIU_WAKE => {
-            with_driver(|driver| driver.wake());
+            with_app_session(AppSession::wake);
             LRESULT(0)
         }
         WM_ANMIXIU_REQUEST_FRAME => {
-            FRAME_REQUEST_QUEUED.store(false, Ordering::Release);
+            with_app_session(|session| session.frame_request_delivered(hwnd));
             arm_frame_timer(hwnd);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == FRAME_TIMER_ID => {
             // SAFETY: This timer id was installed for this HWND by arm_frame_timer.
             if let Err(error) = unsafe { KillTimer(Some(hwnd), FRAME_TIMER_ID) } {
-                report_win32_error("KillTimer failed", error);
+                report_win32_error("KillTimer failed", &error);
                 return LRESULT(0);
             }
-            FRAME_TIMER_ARMED.store(false, Ordering::Release);
-            with_driver(|driver| driver.draw());
+            with_app_session(|session| session.frame_timer_fired(hwnd));
+            with_driver(hwnd, |driver| driver.draw());
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_PAINT => {
@@ -961,16 +1493,16 @@ unsafe extern "system" fn window_proc(
             // SAFETY: Balances BeginPaint for the same HWND and PAINTSTRUCT.
             let paint_ended = unsafe { EndPaint(hwnd, &raw const paint) };
             if !paint_ended.as_bool() {
-                report_win32_error("EndPaint failed", windows::core::Error::from_thread());
+                report_win32_error("EndPaint failed", &windows::core::Error::from_thread());
                 return LRESULT(0);
             }
-            with_driver(|driver| driver.redraw());
+            with_driver(hwnd, |driver| driver.redraw());
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
-        WM_SIZE if wparam.0 as u32 != SIZE_MINIMIZED => {
-            if let Ok(viewport) = viewport_for_window(hwnd) {
-                with_driver(|driver| driver.resize(viewport));
-            }
+        WM_SIZE => {
+            with_app_session(|session| session.window_resized(hwnd, wparam.0));
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -990,21 +1522,38 @@ unsafe extern "system" fn window_proc(
                     )
                 };
                 if let Err(error) = moved {
-                    report_win32_error("SetWindowPos failed during a DPI transition", error);
+                    report_win32_error("SetWindowPos failed during a DPI transition", &error);
                     return LRESULT(0);
                 }
             }
             if let Ok(viewport) = viewport_for_window(hwnd) {
-                with_driver(|driver| driver.resize(viewport));
+                with_driver(hwnd, |driver| driver.resize(viewport));
+                with_app_session(|session| {
+                    if let Some(id) = session.id_for_hwnd(hwnd) {
+                        session.sync_window_info(id);
+                    }
+                });
             }
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
-            with_driver(|driver| driver.system_settings_changed());
+            with_driver(hwnd, |driver| driver.system_settings_changed());
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
+        WM_ACTIVATE => {
+            with_app_session(|session| session.window_focused(hwnd, low_word(wparam.0) != 0));
+            // SAFETY: Activation bookkeeping is complete; default processing maintains focus.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_MOUSEMOVE => {
-            if !MOUSE_LEAVE_TRACKED.swap(true, Ordering::AcqRel) {
+            let should_track = ACTIVE_APP.with(|active| {
+                active
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|session| session.begin_mouse_tracking(hwnd))
+            });
+            if should_track {
                 let mut tracking = TRACKMOUSEEVENT {
                     cbSize: u32::try_from(size_of::<TRACKMOUSEEVENT>()).unwrap_or(u32::MAX),
                     dwFlags: TME_LEAVE,
@@ -1013,21 +1562,23 @@ unsafe extern "system" fn window_proc(
                 };
                 // SAFETY: Tracking struct is writable and identifies the live window.
                 if let Err(error) = unsafe { TrackMouseEvent(&raw mut tracking) } {
-                    MOUSE_LEAVE_TRACKED.store(false, Ordering::Release);
-                    report_win32_error("TrackMouseEvent failed", error);
+                    with_app_session(|session| session.end_mouse_tracking(hwnd));
+                    report_win32_error("TrackMouseEvent failed", &error);
                     return LRESULT(0);
                 }
             }
             let point = logical_client_point(hwnd, signed_low(lparam.0), signed_high(lparam.0));
-            with_driver(|driver| {
+            with_driver(hwnd, |driver| {
                 driver.pointer_moved(point);
                 set_cursor(driver.cursor_style_at(point));
             });
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_MOUSELEAVE_MESSAGE => {
-            MOUSE_LEAVE_TRACKED.store(false, Ordering::Release);
-            with_driver(|driver| driver.pointer_exited());
+            with_app_session(|session| session.end_mouse_tracking(hwnd));
+            with_driver(hwnd, |driver| driver.pointer_exited());
+            with_app_session(AppSession::drain_commands_if_idle);
             set_cursor(CursorStyle::Default);
             LRESULT(0)
         }
@@ -1035,7 +1586,8 @@ unsafe extern "system" fn window_proc(
             // SAFETY: Capturing routes the matching button-up to this live window.
             let _previous_capture = unsafe { SetCapture(hwnd) };
             let point = logical_client_point(hwnd, signed_low(lparam.0), signed_high(lparam.0));
-            with_driver(|driver| driver.pointer_down(point));
+            with_driver(hwnd, |driver| driver.pointer_down(point));
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -1044,7 +1596,8 @@ unsafe extern "system" fn window_proc(
                 tracing::debug!(%error, "pointer capture had already moved before button release");
             }
             let point = logical_client_point(hwnd, signed_low(lparam.0), signed_high(lparam.0));
-            with_driver(|driver| driver.pointer_up(point));
+            with_driver(hwnd, |driver| driver.pointer_up(point));
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
@@ -1057,7 +1610,7 @@ unsafe extern "system" fn window_proc(
             if !converted.as_bool() {
                 report_win32_error(
                     "ScreenToClient failed for a wheel event",
-                    windows::core::Error::from_thread(),
+                    &windows::core::Error::from_thread(),
                 );
                 return LRESULT(0);
             }
@@ -1069,7 +1622,8 @@ unsafe extern "system" fn window_proc(
             } else {
                 (0.0, -delta)
             };
-            with_driver(|driver| driver.scroll(point, delta_x, delta_y));
+            with_driver(hwnd, |driver| driver.scroll(point, delta_x, delta_y));
+            with_app_session(AppSession::drain_commands_if_idle);
             LRESULT(0)
         }
         WM_SETCURSOR => {
@@ -1077,10 +1631,11 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: Non-client cursors (resize borders, title bar) belong to Win32.
                 return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
             }
-            let style = ACTIVE_DRIVER.with(|active| {
+            let style = ACTIVE_APP.with(|active| {
                 active
                     .borrow()
                     .as_ref()
+                    .and_then(|session| session.driver_for_hwnd(hwnd))
                     .map(|driver| driver.cursor_style_at(driver.pointer_position()))
             });
             if let Some(style) = style {
@@ -1093,15 +1648,12 @@ unsafe extern "system" fn window_proc(
         WM_CLOSE => {
             // SAFETY: The user requested closing this live top-level window.
             if let Err(error) = unsafe { DestroyWindow(hwnd) } {
-                report_win32_error("DestroyWindow failed", error);
+                report_win32_error("DestroyWindow failed", &error);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
-            with_driver(|driver| driver.shutdown());
-            ACTIVE_HWND.store(0, Ordering::Release);
-            // SAFETY: Ends the one message loop owned by this window thread.
-            unsafe { PostQuitMessage(0) };
+            with_app_session(|session| session.window_destroyed(hwnd));
             LRESULT(0)
         }
         _ => {
@@ -1112,14 +1664,20 @@ unsafe extern "system" fn window_proc(
 }
 
 fn arm_frame_timer(hwnd: HWND) {
-    if FRAME_TIMER_ARMED.swap(true, Ordering::AcqRel) {
+    let should_arm = ACTIVE_APP.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| session.arm_frame_timer(hwnd))
+    });
+    if !should_arm {
         return;
     }
     // SAFETY: Installs a window-owned timer; no callback pointer means delivery through WM_TIMER.
     let timer = unsafe { SetTimer(Some(hwnd), FRAME_TIMER_ID, FRAME_INTERVAL_MILLIS, None) };
     if timer == 0 {
-        FRAME_TIMER_ARMED.store(false, Ordering::Release);
-        with_driver(|driver| driver.draw());
+        with_app_session(|session| session.frame_timer_fired(hwnd));
+        with_driver(hwnd, |driver| driver.draw());
     }
 }
 
@@ -1160,24 +1718,38 @@ fn set_cursor(style: CursorStyle) {
     }
 }
 
-fn with_driver(operation: impl FnOnce(&Rc<dyn NativeDriver>)) {
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref() {
-            operation(driver);
+fn with_driver(hwnd: HWND, operation: impl FnOnce(&Rc<dyn NativeDriver>)) {
+    let driver = ACTIVE_APP.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .and_then(|session| session.driver_for_hwnd(hwnd))
+    });
+    if let Some(driver) = driver {
+        operation(&driver);
+        with_app_session(AppSession::schedule_dirty_windows);
+    }
+}
+
+fn with_app_session(operation: impl FnOnce(&AppSession)) {
+    ACTIVE_APP.with(|active| {
+        if let Some(session) = active.borrow().as_ref() {
+            operation(session);
         }
     });
 }
 
-fn report_win32_error(operation: &'static str, error: windows::core::Error) {
-    let mut pending = Some(error);
-    ACTIVE_DRIVER.with(|active| {
-        if let Some(driver) = active.borrow().as_ref()
-            && let Some(error) = pending.take()
-        {
-            driver.fail_win32(operation, error);
-        }
+fn report_win32_error(operation: &'static str, error: &windows::core::Error) {
+    let message = format!("{operation}: {error}");
+    let reported = ACTIVE_APP.with(|active| {
+        let active = active.borrow();
+        let Some(session) = active.as_ref() else {
+            return false;
+        };
+        session.fail(AppError::Win32(message.clone()));
+        true
     });
-    if let Some(error) = pending {
+    if !reported {
         tracing::error!(%error, operation, "Win32 operation failed without an active application driver");
     }
 }

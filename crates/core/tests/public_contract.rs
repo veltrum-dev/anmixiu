@@ -1,16 +1,20 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     future::{pending, ready},
     panic::{AssertUnwindSafe, catch_unwind},
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 
 use anmixiu_core::{
-    AppEvents, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element, ElementId,
-    ElementNode, EventError, EventPriority, EventScope, Eventful, FluentBuilder, FrameBatcher,
-    InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, NodeId, ParentElement, Pixels,
-    Render, RenderOnce, SharedString, State, StatefulInteractiveElement, Styled, Typography,
-    WindowId, WindowStateStore, button, div, px, shared_format, text,
+    AppEvents, AppHandle, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element,
+    ElementId, ElementNode, EventError, EventPriority, EventScope, Eventful, FluentBuilder,
+    FrameBatcher, InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, NodeId,
+    ParentElement, Pixels, PropertyUpdate, Render, RenderOnce, SharedString, State,
+    StatefulInteractiveElement, Styled, Typography, Window, WindowAction, WindowDispatcher,
+    WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot,
+    WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility, button, div, px, shared_format,
+    text,
 };
 use anmixiu_reactive::OwnerRegistry;
 use anmixiu_reactive::Signal;
@@ -165,6 +169,236 @@ fn shared_string_static_and_heap_clones_reuse_their_bytes() {
     let formatted = shared_format!("Count {}", 42);
     assert_eq!(formatted.as_str(), "Count 42");
     assert!(!formatted.is_heap_allocated());
+}
+
+#[test]
+fn window_creation_distinguishes_inherited_explicit_and_empty_titles() {
+    let inherited = Window::new();
+    assert_eq!(inherited.requested_title(), None);
+    assert_eq!(inherited.content_size().width(), px(560.0));
+    assert_eq!(inherited.content_size().height(), px(460.0));
+
+    let explicit = Window::new().title("Settings").size(720.0, 480.0);
+    assert_eq!(
+        explicit.requested_title().map(SharedString::as_str),
+        Some("Settings")
+    );
+    assert_eq!(explicit.content_size().width(), px(720.0));
+    assert_eq!(explicit.content_size().height(), px(480.0));
+
+    let empty = Window::new().title("");
+    assert_eq!(empty.requested_title().map(SharedString::as_str), Some(""));
+    assert_eq!(empty.inherit_title().requested_title(), None);
+}
+
+#[test]
+fn window_updates_preserve_keep_set_and_reset_semantics() {
+    let untouched = WindowUpdate::new();
+    assert_eq!(untouched.title_update(), &PropertyUpdate::Keep);
+
+    let changed = WindowUpdate::new()
+        .title("Inspector")
+        .content_size(800.0, 600.0);
+    assert_eq!(
+        changed.title_update(),
+        &PropertyUpdate::Set(SharedString::from("Inspector"))
+    );
+    assert_eq!(
+        changed.content_size_update(),
+        &PropertyUpdate::Set(anmixiu_core::WindowSize::new(800.0, 600.0))
+    );
+
+    let reset = WindowUpdate::new().reset_title();
+    assert_eq!(reset.title_update(), &PropertyUpdate::Reset);
+}
+
+struct FakeWindowDispatcher {
+    dispatcher: RefCell<Option<Weak<dyn WindowDispatcher>>>,
+    next_id: Cell<u64>,
+    handles: RefCell<HashMap<WindowId, WindowHandle>>,
+    active: Cell<Option<WindowId>>,
+}
+
+impl FakeWindowDispatcher {
+    fn app() -> (Rc<Self>, AppHandle) {
+        let dispatcher = Rc::new(Self {
+            dispatcher: RefCell::new(None),
+            next_id: Cell::new(1),
+            handles: RefCell::new(HashMap::new()),
+            active: Cell::new(None),
+        });
+        let erased: Rc<dyn WindowDispatcher> = dispatcher.clone();
+        let weak = Rc::downgrade(&erased);
+        dispatcher.dispatcher.borrow_mut().replace(weak.clone());
+        (dispatcher, AppHandle::new(weak))
+    }
+}
+
+impl WindowDispatcher for FakeWindowDispatcher {
+    fn open_window(&self, window: Window, _root: WindowRoot) -> Result<WindowHandle, WindowError> {
+        let raw_id = self.next_id.get();
+        self.next_id.set(raw_id + 1);
+        let id = WindowId::new(raw_id);
+        let title = window
+            .requested_title()
+            .cloned()
+            .unwrap_or_else(|| SharedString::from("Test App"));
+        let handle = WindowHandle::new(
+            id,
+            self.dispatcher
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or(WindowError::AppStopped)?,
+            WindowInfo {
+                id,
+                title,
+                content_size: window.content_size(),
+                scale_factor: 2.0,
+                focused: true,
+                visibility: WindowVisibility::Visible,
+                mode: WindowMode::Windowed,
+                status: WindowStatus::Open,
+            },
+        );
+        self.handles.borrow_mut().insert(id, handle.clone());
+        self.active.set(Some(id));
+        Ok(handle)
+    }
+
+    fn update_window(&self, id: WindowId, update: WindowUpdate) -> Result<(), WindowError> {
+        let handle = self
+            .handles
+            .borrow()
+            .get(&id)
+            .cloned()
+            .ok_or(WindowError::Closed(id))?;
+        let mut info = handle.info();
+        match update.title_update() {
+            PropertyUpdate::Keep => {}
+            PropertyUpdate::Set(title) => info.title.clone_from(title),
+            PropertyUpdate::Reset => info.title = SharedString::from("Test App"),
+        }
+        if let PropertyUpdate::Set(size) = update.content_size_update() {
+            info.content_size = *size;
+        }
+        handle.replace_info(info);
+        Ok(())
+    }
+
+    fn window_action(&self, id: WindowId, action: WindowAction) -> Result<(), WindowError> {
+        let handle = self
+            .handles
+            .borrow()
+            .get(&id)
+            .cloned()
+            .ok_or(WindowError::Closed(id))?;
+        if action == WindowAction::Close {
+            let mut info = handle.info();
+            info.status = WindowStatus::Closed;
+            info.visibility = WindowVisibility::Hidden;
+            info.focused = false;
+            handle.replace_info(info);
+            self.handles.borrow_mut().remove(&id);
+            self.active.set(None);
+        }
+        Ok(())
+    }
+
+    fn windows(&self) -> Vec<WindowHandle> {
+        self.handles.borrow().values().cloned().collect()
+    }
+
+    fn active_window(&self) -> Option<WindowHandle> {
+        self.handles.borrow().get(&self.active.get()?).cloned()
+    }
+}
+
+#[test]
+fn app_and_window_handles_open_update_query_and_close_without_ambiguous_defaults() {
+    let (_dispatcher, app) = FakeWindowDispatcher::app();
+    let handle = app
+        .open_window(Window::new(), LifecycleProbe::default())
+        .expect("open window");
+
+    assert_eq!(handle.info().title.as_str(), "Test App");
+    assert_eq!(
+        app.active_window().map(|window| window.id()),
+        Some(handle.id())
+    );
+    assert_eq!(app.windows().len(), 1);
+
+    handle
+        .update(WindowUpdate::new().title("").content_size(800.0, 600.0))
+        .expect("update live window");
+    assert_eq!(handle.info().title.as_str(), "");
+    assert_eq!(handle.info().content_size.width(), px(800.0));
+
+    handle
+        .update(WindowUpdate::new().reset_title())
+        .expect("reset title");
+    assert_eq!(handle.info().title.as_str(), "Test App");
+
+    handle.close().expect("close live window");
+    assert_eq!(handle.info().status, WindowStatus::Closed);
+    assert!(app.windows().is_empty());
+    assert_eq!(
+        handle.update(WindowUpdate::new()),
+        Err(WindowError::Closed(handle.id()))
+    );
+}
+
+struct WindowContextProbe {
+    seen_window: Rc<Cell<Option<WindowId>>>,
+    seen_window_count: Rc<Cell<usize>>,
+}
+
+impl Render for WindowContextProbe {
+    fn render(&self, cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        let window = cx.window();
+        self.seen_window.set(Some(window.id()));
+        let _info = window.info();
+        self.seen_window_count.set(cx.app().windows().len());
+        text("window context")
+    }
+}
+
+#[test]
+fn erased_window_root_injects_the_stable_owner_window_and_app_handles() {
+    let (_dispatcher, app) = FakeWindowDispatcher::app();
+    let handle = app
+        .open_window(Window::new(), LifecycleProbe::default())
+        .expect("open fake window");
+    let owners = OwnerRegistry::new();
+    let runtime = AppRuntime::new(|| {}).expect("runtime");
+    let seen_window = Rc::new(Cell::new(None));
+    let seen_window_count = Rc::new(Cell::new(0));
+    let root = WindowRoot::new(WindowContextProbe {
+        seen_window: seen_window.clone(),
+        seen_window_count: seen_window_count.clone(),
+    });
+    let mut mounted = root.mount(WindowMountContext {
+        app_state: AppStateStore::new(),
+        window_state: WindowStateStore::new(),
+        app_events: AppEvents::new(),
+        app_handle: app,
+        window_handle: handle.clone(),
+        owners: owners.clone(),
+        spawner: runtime.ui().spawner(owners.clone()),
+    });
+
+    mounted.host.render().expect("render erased root");
+    assert_eq!(seen_window.get(), Some(handle.id()));
+    assert_eq!(seen_window_count.get(), 1);
+    let mut info = handle.info();
+    info.title = SharedString::from("Changed by native callback");
+    handle.replace_info(info);
+    assert_eq!(
+        owners.dirty_len(),
+        1,
+        "WindowInfo reads during render must be reactive"
+    );
+    mounted.host.unmount();
 }
 
 #[test]

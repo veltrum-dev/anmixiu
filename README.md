@@ -97,6 +97,46 @@ App::new()
 
 If neither level sets a field, the native platform UI font and its default visible size are used.
 
+Window titles inherit the application name unless explicitly set. `Window` is the creation
+configuration, while components receive live `AppHandle` and `WindowHandle` values through their
+`Context`. `cx.window()` always identifies the window that owns that component;
+`cx.app().active_window()` instead follows native focus.
+
+```rust
+impl Render for Workspace {
+    fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.app();
+        button("Open inspector")
+            .id("open-inspector")
+            .on_click(move || {
+                if let Err(error) = app.open_window(
+                    Window::new().title("Inspector").size(420.0, 300.0),
+                    Inspector::default(),
+                ) {
+                    eprintln!("failed to open inspector: {error}");
+                }
+            })
+    }
+}
+```
+
+`WindowHandle::info()` is a reactive snapshot containing the resolved title, logical content size,
+native scale, focus, visibility, presentation mode, and lifecycle status. Native properties are
+updated in one command with `WindowUpdate`; resetting a title restores application-name
+inheritance rather than conflating reset with an empty title.
+
+```rust
+let window = cx.window();
+let info = window.info();
+if let Err(error) = window.update(
+    WindowUpdate::new()
+        .title("Renamed")
+        .content_size(800.0, 600.0),
+) {
+    eprintln!("failed to update {:?}: {error}", info.id);
+}
+```
+
 Run the native Counter on macOS or Windows:
 
 ```sh
@@ -127,6 +167,13 @@ cargo run --example event
 
 `Eventful` is an explicit root capability: launch an implementing component with
 `App::run_eventful`. Ordinary `App::run` does not inspect or bind optional traits.
+
+Run the multi-window example to open, update, inspect, focus, and close independently owned native
+windows:
+
+```sh
+cargo run --example multi_window
+```
 
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad
 deltas into a target and follows it on the display link, while the scene paints an unobtrusive

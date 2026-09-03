@@ -37,6 +37,29 @@ Unmount removes dependency edges and cancels unfinished owner-bound UI futures. 
 window state are retained only by their corresponding stores; same-typed window state takes
 precedence over application state.
 
+## Native windows
+
+`Window` is a portable creation configuration. Its optional title means “inherit the application
+name”; an explicit empty `SharedString` remains an intentionally empty title. Native adapters
+resolve that configuration into a `WindowInfo` snapshot and retain it behind `WindowHandle`.
+Reading the snapshot during render subscribes the component owner, so native resize, scale, focus,
+visibility, and presentation-mode changes invalidate the appropriate frame without synchronous
+AppKit or Win32 queries from application code.
+
+Each application owns a bounded window-command queue and a live registry keyed by generated
+`WindowId`. A command is removed from the queue before it runs, allowing mount and input callbacks
+to enqueue another open/update/close operation without re-entering a `RefCell` borrow. Closed
+windows are removed rather than retained as history. Their root host unmounts, owner tasks and event
+subscriptions are cancelled, renderer/surface state is released, and stale handles retain only the
+final `Closed` snapshot. The native application loop exits only when the final window closes.
+
+All windows share the application's single Tokio runtime, application state, and typed event
+router. Each window separately owns its root host, reactive owner registry, window state, frame
+builder, renderer, viewport, pointer state, and native display scheduling. macOS routes each
+`NSView` display link through its immutable `WindowId`; Windows routes each HWND and its frame timer
+through the same identity. `Context::window()` is therefore owner-bound and stable, while
+`AppHandle::active_window()` is the changing native-focus view.
+
 ## Element identity
 
 `ElementId` is a caller-provided semantic identity, not a traversal index. Calling `.id(...)`
