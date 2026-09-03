@@ -897,7 +897,7 @@ impl DriverState {
                 self.host.did_paint();
                 false
             }
-            FrameOutcome::DrawableUnavailable { .. } => {
+            FrameOutcome::DrawableUnavailable { .. } | FrameOutcome::CompositorBusy { .. } => {
                 self.needs_frame = true;
                 take_drawable_retry_slot(&mut self.drawable_retry_armed)
             }

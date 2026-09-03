@@ -71,6 +71,21 @@ div().width(320.0).height(200).padding(16).rounded(8.0)
 readability. Future non-pixel units will use explicit constructors and will not change the meaning
 of bare numeric values.
 
+Backdrop blur is a paint-only effect. Its Gaussian sigma is expressed in logical pixels and applies
+only to content already painted behind the element; the element's own background, border, text, and
+children remain sharp. A translucent fill is typically layered over the filtered backdrop:
+
+```rust
+div()
+    .backdrop_blur(16.0)
+    .background(Color::rgba(0.12, 0.14, 0.18, 0.55))
+    .rounded(12.0)
+```
+
+Portable renderers clamp sigma to 64 logical pixels. Scenes without backdrop effects retain the
+direct-to-surface fast path and allocate no compositor textures. Blur scenes use bounded reusable
+intermediate textures; smaller effect bounds and static backdrops remain the most efficient usage.
+
 `div()`, `text()`, and `button()` return concrete `DivElement`, `TextElement`, and
 `ButtonElement` values. Custom element recipes implement `Element`; persistent stateful components
 implement `Render`. Style, children, identity, and stateful interaction are separate traits exposed

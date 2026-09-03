@@ -1,6 +1,17 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, fmt, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    num::NonZeroUsize,
+    sync::{Arc, OnceLock},
+};
+
+/// Portable upper bound for a backdrop Gaussian sigma in logical pixels.
+///
+/// Renderers clamp larger finite values to this limit before choosing platform-specific kernels
+/// and downsampling. The bound keeps effect work and sampling margins predictable across backends.
+pub const MAX_BACKDROP_BLUR_SIGMA: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
@@ -328,6 +339,16 @@ pub enum DrawCommand {
         border_width: f32,
         clip: Option<Clip>,
     },
+    /// Blurs the pixels produced by preceding commands, then replaces the backdrop inside the
+    /// rounded bounds before subsequent commands are drawn.
+    BackdropBlur {
+        bounds: Rect,
+        /// Gaussian sigma in logical pixels.
+        sigma: f32,
+        corner_radius: f32,
+        /// Additional ancestor clip, such as a scroll viewport.
+        clip: Option<Clip>,
+    },
     Glyphs {
         glyphs: Arc<[Glyph]>,
         color: Color,
@@ -358,11 +379,20 @@ impl HitRegion {
 }
 
 /// Immutable, shareable frame data. Hit regions are stored in paint order.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Scene {
     commands: Arc<[DrawCommand]>,
     atlas_uploads: Arc<[AtlasUpload]>,
     hit_regions: Arc<[HitRegion]>,
+    requires_compositing: OnceLock<bool>,
+}
+
+impl PartialEq for Scene {
+    fn eq(&self, other: &Self) -> bool {
+        self.commands == other.commands
+            && self.atlas_uploads == other.atlas_uploads
+            && self.hit_regions == other.hit_regions
+    }
 }
 
 impl Scene {
@@ -376,6 +406,7 @@ impl Scene {
             commands: commands.into(),
             atlas_uploads: atlas_uploads.into(),
             hit_regions: hit_regions.into(),
+            requires_compositing: OnceLock::new(),
         }
     }
 
@@ -387,6 +418,16 @@ impl Scene {
     #[must_use]
     pub fn commands(&self) -> &[DrawCommand] {
         &self.commands
+    }
+
+    /// Returns whether this scene needs an intermediate compositing surface.
+    #[must_use]
+    pub fn requires_compositing(&self) -> bool {
+        *self.requires_compositing.get_or_init(|| {
+            self.commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::BackdropBlur { .. }))
+        })
     }
 
     #[must_use]

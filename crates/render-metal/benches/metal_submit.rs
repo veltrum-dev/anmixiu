@@ -6,6 +6,45 @@ use criterion::BenchmarkId;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 #[cfg(target_os = "macos")]
+fn split_backdrop_scene(
+    size: anmixiu_scene::Size,
+    blur_bounds: anmixiu_scene::Rect,
+    sigma: f32,
+    corner_radius: f32,
+) -> anmixiu_scene::Scene {
+    use anmixiu_scene::{Color, DrawCommand, Point, Rect, Scene, Size};
+
+    Scene::new(
+        vec![
+            DrawCommand::SolidQuad {
+                bounds: Rect::new(
+                    Point::new(0.0, 0.0),
+                    Size::new(size.width / 2.0, size.height),
+                ),
+                color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::SolidQuad {
+                bounds: Rect::new(
+                    Point::new(size.width / 2.0, 0.0),
+                    Size::new(size.width / 2.0, size.height),
+                ),
+                color: Color::rgba(0.0, 0.0, 1.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::BackdropBlur {
+                bounds: blur_bounds,
+                sigma,
+                corner_radius,
+                clip: None,
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn register(criterion: &mut Criterion) {
     use anmixiu_render_metal::{MetalRenderer, SurfaceSize};
     use anmixiu_scene::{Color, DrawCommand, Point, Rect, Scene, Size};
@@ -42,7 +81,56 @@ fn register(criterion: &mut Criterion) {
             },
         );
     }
+    let blur_scene = split_backdrop_scene(
+        Size::new(256.0, 256.0),
+        Rect::new(Point::new(48.0, 48.0), Size::new(160.0, 160.0)),
+        16.0,
+        24.0,
+    );
+    group.bench_with_input(
+        BenchmarkId::new("backdrop_blur_sigma", 16),
+        &blur_scene,
+        |bencher, scene| {
+            bencher.iter(|| {
+                black_box(renderer.render_offscreen(black_box(scene), size).unwrap());
+            });
+        },
+    );
     group.finish();
+
+    let retina_size = SurfaceSize::new(1_200, 800).unwrap();
+    let direct_retina = Scene::new(
+        vec![DrawCommand::SolidQuad {
+            bounds: Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 400.0)),
+            color: Color::rgba(0.2, 0.4, 0.8, 1.0),
+            clip: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    let blur_retina = split_backdrop_scene(
+        Size::new(600.0, 400.0),
+        Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 400.0)),
+        16.0,
+        24.0,
+    );
+    let mut retina_group = criterion.benchmark_group("metal_retina_600x400");
+    retina_group.sample_size(20);
+    for (name, scene) in [
+        ("direct", direct_retina),
+        ("backdrop_blur_sigma_16", blur_retina),
+    ] {
+        retina_group.bench_with_input(name, &scene, |bencher, scene| {
+            bencher.iter(|| {
+                black_box(
+                    renderer
+                        .render_offscreen_scaled(black_box(scene), retina_size, 2.0)
+                        .unwrap(),
+                );
+            });
+        });
+    }
+    retina_group.finish();
 }
 
 #[cfg(not(target_os = "macos"))]

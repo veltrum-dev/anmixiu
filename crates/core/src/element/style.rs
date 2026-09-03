@@ -152,6 +152,8 @@ pub struct Style {
     pub align_self: Option<AlignItems>,
     pub justify_content: JustifyContent,
     pub background: Color,
+    /// Gaussian backdrop-filter sigma in logical pixels.
+    pub backdrop_blur: Option<Pixels>,
     pub foreground: Option<Color>,
     pub border_width: Pixels,
     pub border_color: Color,
@@ -179,6 +181,7 @@ impl Default for Style {
             align_self: None,
             justify_content: JustifyContent::Start,
             background: Color::TRANSPARENT,
+            backdrop_blur: None,
             foreground: None,
             border_width: px(0.0),
             border_color: Color::TRANSPARENT,
@@ -282,6 +285,17 @@ pub trait Styled: Sized {
     #[must_use]
     fn background(mut self, value: impl Into<Color>) -> Self {
         self.style().background = value.into();
+        self
+    }
+
+    /// Applies a Gaussian blur to content painted behind this element.
+    ///
+    /// The sigma is measured in logical pixels. Non-positive and non-finite values are retained in
+    /// the style but produce no scene effect; platform renderers clamp larger finite values to 64
+    /// logical pixels.
+    #[must_use]
+    fn backdrop_blur(mut self, sigma: impl Into<Pixels>) -> Self {
+        self.style().backdrop_blur = Some(sigma.into());
         self
     }
 

@@ -36,6 +36,8 @@ fn offscreen_solid_quad_can_be_read_back() {
 
     assert_eq!(image.pixel_rgba(4, 4), [255, 0, 0, 255]);
     assert_eq!(renderer.stats().submitted_frames, 1);
+    assert_eq!(renderer.stats().composited_frames, 0);
+    assert_eq!(renderer.stats().compositor_texture_bytes, 0);
 }
 
 #[test]
@@ -84,6 +86,166 @@ fn offscreen_rounded_border_preserves_rounded_outer_and_inner_edges() {
     assert_eq!(image.pixel_rgba(0, 0), [0, 0, 0, 0], "rounded outer edge");
     assert_eq!(image.pixel_rgba(8, 0), [255, 255, 255, 255], "border");
     assert_eq!(image.pixel_rgba(8, 8), [0, 0, 0, 0], "hollow center");
+}
+
+#[test]
+fn backdrop_blur_mixes_preceding_pixels_without_affecting_pixels_outside_its_bounds() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = Scene::new(
+        vec![
+            DrawCommand::SolidQuad {
+                bounds: rect(0.0, 0.0, 16.0, 16.0),
+                color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::SolidQuad {
+                bounds: rect(16.0, 0.0, 16.0, 16.0),
+                color: Color::rgba(0.0, 0.0, 1.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::BackdropBlur {
+                bounds: rect(8.0, 0.0, 16.0, 16.0),
+                sigma: 3.0,
+                corner_radius: 6.0,
+                clip: Some(Clip::rectangular(rect(8.0, 0.0, 8.0, 16.0))),
+            },
+            DrawCommand::SolidQuad {
+                bounds: rect(14.0, 6.0, 4.0, 4.0),
+                color: Color::rgba(0.0, 1.0, 0.0, 1.0),
+                clip: None,
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(32, 16).unwrap())
+        .unwrap();
+
+    assert_eq!(image.pixel_rgba(4, 8), [255, 0, 0, 255]);
+    assert_eq!(
+        image.pixel_rgba(8, 0),
+        [255, 0, 0, 255],
+        "rounded corner preserves the unfiltered backdrop"
+    );
+    let mixed = image.pixel_rgba(15, 3);
+    assert!(mixed[0] > 0 && mixed[2] > 0, "blurred boundary: {mixed:?}");
+    assert_eq!(
+        image.pixel_rgba(20, 3),
+        [0, 0, 255, 255],
+        "ancestor clip prevents backdrop replacement outside its bounds"
+    );
+    assert_eq!(
+        image.pixel_rgba(15, 8),
+        [0, 255, 0, 255],
+        "commands after the backdrop effect remain sharp"
+    );
+    assert_eq!(renderer.stats().composited_frames, 1);
+    assert_eq!(renderer.stats().backdrop_blur_operations, 1);
+    let compositor_bytes = renderer.stats().compositor_texture_bytes;
+    assert!(compositor_bytes > 0);
+
+    renderer
+        .render_offscreen(&scene, SurfaceSize::new(32, 16).unwrap())
+        .unwrap();
+    assert_eq!(
+        renderer.stats().compositor_texture_bytes,
+        compositor_bytes,
+        "steady-state rendering reuses the bounded texture slot"
+    );
+}
+
+#[test]
+fn backdrop_compositor_rejects_unbounded_effect_counts_and_reuses_one_scratch_pair() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let blur = || DrawCommand::BackdropBlur {
+        bounds: rect(0.0, 0.0, 8.0, 8.0),
+        sigma: 1.0,
+        corner_radius: 0.0,
+        clip: None,
+    };
+    let too_many = Scene::new((0..65).map(|_| blur()).collect(), Vec::new(), Vec::new());
+    assert_eq!(
+        renderer
+            .render_offscreen(&too_many, SurfaceSize::new(8, 8).unwrap())
+            .unwrap_err(),
+        anmixiu_render_metal::RenderError::TooManyBackdropBlurs
+    );
+
+    let repeated_blurs = Scene::new(
+        (0..40)
+            .map(|_| DrawCommand::BackdropBlur {
+                bounds: rect(0.0, 0.0, 32.0, 32.0),
+                sigma: 1.0,
+                corner_radius: 0.0,
+                clip: None,
+            })
+            .collect(),
+        Vec::new(),
+        Vec::new(),
+    );
+    renderer
+        .render_offscreen(&repeated_blurs, SurfaceSize::new(32, 32).unwrap())
+        .unwrap();
+    assert_eq!(renderer.stats().backdrop_blur_operations, 40);
+    assert_eq!(
+        renderer.stats().compositor_texture_bytes,
+        32 * 32 * 4 * 3,
+        "one scene texture and one reusable blur texture pair are retained"
+    );
+}
+
+#[test]
+fn differently_sized_backdrop_effects_share_scratch_without_changing_their_sampling_space() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let mut commands = Vec::new();
+    for (x, color) in [
+        (0.0, Color::rgba(1.0, 0.0, 0.0, 1.0)),
+        (16.0, Color::rgba(0.0, 0.0, 1.0, 1.0)),
+        (32.0, Color::rgba(1.0, 0.0, 0.0, 1.0)),
+        (48.0, Color::rgba(0.0, 0.0, 1.0, 1.0)),
+    ] {
+        commands.push(DrawCommand::SolidQuad {
+            bounds: rect(x, 0.0, 16.0, 16.0),
+            color,
+            clip: None,
+        });
+    }
+    commands.push(DrawCommand::BackdropBlur {
+        bounds: rect(12.0, 4.0, 8.0, 8.0),
+        sigma: 1.0,
+        corner_radius: 0.0,
+        clip: None,
+    });
+    commands.push(DrawCommand::BackdropBlur {
+        bounds: rect(32.0, 0.0, 32.0, 16.0),
+        sigma: 3.0,
+        corner_radius: 0.0,
+        clip: None,
+    });
+
+    let image = renderer
+        .render_offscreen(
+            &Scene::new(commands, Vec::new(), Vec::new()),
+            SurfaceSize::new(64, 16).unwrap(),
+        )
+        .unwrap();
+
+    let first_boundary = image.pixel_rgba(15, 8);
+    assert!(first_boundary[0] > 0 && first_boundary[2] > 0);
+    let second_boundary = image.pixel_rgba(47, 8);
+    assert!(second_boundary[0] > 0 && second_boundary[2] > 0);
+    assert_eq!(renderer.stats().backdrop_blur_operations, 2);
 }
 
 #[test]

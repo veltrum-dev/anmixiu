@@ -78,6 +78,9 @@ pub struct RenderStats {
     pub atlas_evictions: u64,
     pub cached_atlases: usize,
     pub cached_atlas_bytes: usize,
+    pub composited_frames: u64,
+    pub backdrop_blur_operations: u64,
+    pub compositor_texture_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +115,12 @@ pub enum RenderError {
     },
     #[error("scene references atlas {atlas}, but it has not been uploaded")]
     MissingAtlas { atlas: u64 },
+    #[error("a scene may contain at most 64 backdrop blur operations")]
+    TooManyBackdropBlurs,
+    #[error("backdrop compositor textures exceed the 256 MiB hard budget")]
+    CompositorBudgetExceeded,
+    #[error("backdrop compositor resources were not prepared for the scene")]
+    CompositorResourcesUnavailable,
     #[error("D3D11/Direct2D operation failed: {0}")]
     Graphics(String),
     #[error("D3D11 is only available on Windows")]
@@ -130,23 +139,28 @@ mod platform {
         collections::HashMap, marker::PhantomData, mem::ManuallyDrop, num::NonZeroUsize, rc::Rc,
     };
 
-    use anmixiu_scene::{AtlasId, AtlasUpload, Clip, Color, DrawCommand, Rect, Scene};
+    use anmixiu_scene::{
+        AtlasId, AtlasUpload, Clip, Color, DrawCommand, MAX_BACKDROP_BLUR_SIGMA, Rect, Scene,
+    };
     use windows::{
         Win32::{
             Foundation::{HMODULE, HWND},
             Graphics::{
                 Direct2D::Common::{
                     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-                    D2D1_PIXEL_FORMAT,
+                    D2D1_COMPOSITE_MODE_SOURCE_COPY, D2D1_PIXEL_FORMAT,
                 },
                 Direct2D::{
-                    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
-                    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-                    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_LAYER_OPTIONS1_NONE,
-                    D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT, D2D1_UNIT_MODE_DIPS,
-                    D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext,
-                    ID2D1Factory, ID2D1Geometry, ID2D1Image, ID2D1SolidColorBrush,
+                    CLSID_D2D1GaussianBlur, D2D1_ANTIALIAS_MODE_ALIASED,
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+                    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
+                    D2D1_LAYER_PARAMETERS1, D2D1_PRIMITIVE_BLEND_COPY,
+                    D2D1_PRIMITIVE_BLEND_SOURCE_OVER, D2D1_PROPERTY_TYPE_FLOAT, D2D1_ROUNDED_RECT,
+                    D2D1_UNIT_MODE_DIPS, D2D1CreateDevice, ID2D1Bitmap1, ID2D1Brush, ID2D1Device,
+                    ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Geometry, ID2D1Image,
+                    ID2D1SolidColorBrush,
                 },
                 Direct3D::{
                     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0,
@@ -170,7 +184,7 @@ mod platform {
         },
         core::{Interface, Result as WindowsResult},
     };
-    use windows_numerics::Matrix3x2;
+    use windows_numerics::{Matrix3x2, Vector2};
 
     use super::{FrameOutcome, RenderError, RenderStats, RendererConfig, SurfaceSize};
 
@@ -188,6 +202,15 @@ mod platform {
         last_used: u64,
     }
 
+    const MAX_BACKDROP_BLURS_PER_FRAME: usize = 64;
+    const COMPOSITOR_TEXTURE_BUDGET: usize = 256 * 1024 * 1024;
+
+    #[derive(Clone, Copy)]
+    struct BlurPlan {
+        sample_bounds: Rect,
+        scratch_size: SurfaceSize,
+    }
+
     /// Main-thread D3D11 renderer. `Rc` phantom data prevents accidental transfer to a worker.
     pub struct D3d11Renderer {
         _d3d_device: ID3D11Device,
@@ -196,6 +219,10 @@ mod platform {
         factory: ID2D1Factory,
         swap_chain: IDXGISwapChain,
         target: Option<ID2D1Bitmap1>,
+        composite_scene: Option<ID2D1Bitmap1>,
+        composite_scratch: Option<ID2D1Bitmap1>,
+        composite_scratch_size: Option<SurfaceSize>,
+        blur_effect: Option<ID2D1Effect>,
         brush: ID2D1SolidColorBrush,
         surface: SurfaceSize,
         scale: f32,
@@ -292,6 +319,10 @@ mod platform {
                 factory,
                 swap_chain,
                 target: Some(target),
+                composite_scene: None,
+                composite_scratch: None,
+                composite_scratch_size: None,
+                blur_effect: None,
                 brush,
                 surface: size,
                 scale,
@@ -329,6 +360,10 @@ mod platform {
             // required before DXGI ResizeBuffers; the context and swap chain remain live.
             unsafe { self.context.SetTarget(None::<&ID2D1Image>) };
             self.target = None;
+            self.composite_scene = None;
+            self.composite_scratch = None;
+            self.composite_scratch_size = None;
+            self.stats.compositor_texture_bytes = 0;
             // SAFETY: Width and height are non-zero by SurfaceSize construction; format and flags
             // are preserved from the original swap chain.
             unsafe {
@@ -375,6 +410,22 @@ mod platform {
             }
             self.upload_atlases(scene.atlas_uploads())?;
             self.validate_scene_atlases(scene)?;
+            if scene.requires_compositing() {
+                self.render_composited(scene)?;
+            } else {
+                self.render_direct(scene)?;
+            }
+            // SAFETY: Present queues the completed back buffer with vsync and returns without a
+            // CPU wait for GPU completion.
+            unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }
+                .ok()
+                .map_err(graphics_error)?;
+            self.stats.presented_frames = self.stats.presented_frames.saturating_add(1);
+            self.refresh_cache_stats();
+            Ok(FrameOutcome::Presented)
+        }
+
+        fn render_direct(&mut self, scene: &Scene) -> Result<(), RenderError> {
             let clear = D2D1_COLOR_F {
                 r: 0.0,
                 g: 0.0,
@@ -394,15 +445,277 @@ mod platform {
             // SAFETY: This balances BeginDraw even when command validation returns an error.
             let end_result = unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error);
             draw_result?;
+            end_result
+        }
+
+        fn render_composited(&mut self, scene: &Scene) -> Result<(), RenderError> {
+            self.prepare_compositor(scene)?;
+            let scene_bitmap = self
+                .composite_scene
+                .clone()
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            let clear = D2D1_COLOR_F::default();
+            // SAFETY: The intermediate bitmap belongs to this context and is not sampled while it
+            // is bound as the current target.
+            unsafe {
+                self.context.SetTarget(&scene_bitmap);
+                self.context.BeginDraw();
+                self.context.Clear(Some(&raw const clear));
+            }
+
+            let mut draw_result = Ok(());
+            for command in scene.commands() {
+                if let DrawCommand::BackdropBlur {
+                    bounds,
+                    sigma,
+                    corner_radius,
+                    clip,
+                } = command
+                {
+                    let Some(plan) = d2d_blur_plan(command, self.surface, self.scale) else {
+                        continue;
+                    };
+                    // SAFETY: This closes the scene-target draw before that bitmap becomes the
+                    // Gaussian effect input.
+                    if let Err(error) = unsafe { self.context.EndDraw(None, None) } {
+                        return Err(graphics_error(error));
+                    }
+                    self.draw_backdrop_blur(
+                        &scene_bitmap,
+                        plan,
+                        *bounds,
+                        *sigma,
+                        *corner_radius,
+                        *clip,
+                    )?;
+                    continue;
+                }
+                if let Err(error) = self.draw_command(command) {
+                    draw_result = Err(error);
+                    break;
+                }
+            }
+            // SAFETY: `draw_backdrop_blur` leaves the scene target inside a fresh BeginDraw, while
+            // the initial path began it above; this closes either balanced path.
+            let end_result = unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error);
+            draw_result?;
             end_result?;
-            // SAFETY: Present queues the completed back buffer with vsync and returns without a
-            // CPU wait for GPU completion.
-            unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }
-                .ok()
+
+            let target = self
+                .target
+                .clone()
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            let destination = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: self.surface.width() as f32 / self.scale,
+                bottom: self.surface.height() as f32 / self.scale,
+            };
+            // SAFETY: The swap-chain target and source intermediate are distinct live bitmaps.
+            unsafe {
+                self.context.SetTarget(&target);
+                self.context.BeginDraw();
+                self.context.Clear(Some(&raw const clear));
+                self.context.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+                self.context.DrawBitmap(
+                    &scene_bitmap,
+                    Some(&raw const destination),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    Some(&raw const destination),
+                    None,
+                );
+                self.context
+                    .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+            }
+            // SAFETY: Balances the final swap-chain BeginDraw above.
+            unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error)?;
+            self.stats.draw_calls = self.stats.draw_calls.saturating_add(1);
+            self.stats.composited_frames = self.stats.composited_frames.saturating_add(1);
+            Ok(())
+        }
+
+        fn prepare_compositor(&mut self, scene: &Scene) -> Result<(), RenderError> {
+            let blur_count = scene
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::BackdropBlur { .. }))
+                .count();
+            if blur_count > MAX_BACKDROP_BLURS_PER_FRAME {
+                return Err(RenderError::TooManyBackdropBlurs);
+            }
+            let mut scratch_width = 0;
+            let mut scratch_height = 0;
+            for command in scene.commands() {
+                if let Some(plan) = d2d_blur_plan(command, self.surface, self.scale) {
+                    scratch_width = scratch_width.max(plan.scratch_size.width());
+                    scratch_height = scratch_height.max(plan.scratch_size.height());
+                }
+            }
+            let scratch_size = if scratch_width > 0 && scratch_height > 0 {
+                Some(SurfaceSize::new(scratch_width, scratch_height)?)
+            } else {
+                None
+            };
+            let total_bytes =
+                bitmap_bytes(self.surface).saturating_add(scratch_size.map_or(0, bitmap_bytes));
+            if total_bytes > COMPOSITOR_TEXTURE_BUDGET {
+                return Err(RenderError::CompositorBudgetExceeded);
+            }
+            if self.composite_scene.is_none() {
+                self.composite_scene = Some(create_composite_bitmap(
+                    &self.context,
+                    self.surface,
+                    self.scale,
+                )?);
+            }
+            if let Some(scratch_size) = scratch_size {
+                if self.composite_scratch_size != Some(scratch_size) {
+                    self.composite_scratch = Some(create_composite_bitmap(
+                        &self.context,
+                        scratch_size,
+                        self.scale,
+                    )?);
+                    self.composite_scratch_size = Some(scratch_size);
+                }
+                if self.blur_effect.is_none() {
+                    let effect_id = CLSID_D2D1GaussianBlur;
+                    // SAFETY: The built-in effect identifier is stable and the returned effect is
+                    // retained by the renderer on the same device context.
+                    self.blur_effect = Some(
+                        unsafe { self.context.CreateEffect(&raw const effect_id) }
+                            .map_err(graphics_error)?,
+                    );
+                }
+            } else {
+                self.composite_scratch = None;
+                self.composite_scratch_size = None;
+            }
+            self.stats.compositor_texture_bytes = total_bytes;
+            Ok(())
+        }
+
+        fn draw_backdrop_blur(
+            &mut self,
+            scene_bitmap: &ID2D1Bitmap1,
+            plan: BlurPlan,
+            bounds: Rect,
+            sigma: f32,
+            corner_radius: f32,
+            ancestor_clip: Option<Clip>,
+        ) -> Result<(), RenderError> {
+            let scratch = self
+                .composite_scratch
+                .clone()
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            let effect = self
+                .blur_effect
+                .clone()
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            let sigma = sigma.clamp(f32::EPSILON, MAX_BACKDROP_BLUR_SIGMA);
+            let sigma_bytes = sigma.to_ne_bytes();
+            // SAFETY: The scene bitmap is unbound after EndDraw and remains live while the effect
+            // graph is encoded.
+            unsafe { effect.SetInput(0, scene_bitmap, true) };
+            let prepared_effect = (|| -> Result<(ID2D1Image, D2D_RECT_F), RenderError> {
+                // SAFETY: Property bytes contain exactly one native-endian f32.
+                unsafe {
+                    effect.SetValue(
+                        D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                        D2D1_PROPERTY_TYPE_FLOAT,
+                        &sigma_bytes,
+                    )
+                }
                 .map_err(graphics_error)?;
-            self.stats.presented_frames = self.stats.presented_frames.saturating_add(1);
-            self.refresh_cache_stats();
-            Ok(FrameOutcome::Presented)
+                // SAFETY: The configured built-in effect retains its live scene input.
+                let output = unsafe { effect.GetOutput() }.map_err(graphics_error)?;
+                // SAFETY: Bounds are queried synchronously from the effect graph on its creating
+                // context. Gaussian soft borders can move the output origin into negative space.
+                let output_bounds =
+                    unsafe { self.context.GetImageLocalBounds(&output) }.map_err(graphics_error)?;
+                Ok((output, output_bounds))
+            })();
+            let (output, output_bounds) = match prepared_effect {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    // SAFETY: Clears the retained input before propagating setup failure.
+                    unsafe { effect.SetInput(0, None::<&ID2D1Image>, true) };
+                    return Err(error);
+                }
+            };
+            let source = d2d_rect(plan.sample_bounds);
+            let target_offset = Vector2 {
+                X: output_bounds.left - source.left,
+                Y: output_bounds.top - source.top,
+            };
+            let clear = D2D1_COLOR_F::default();
+            // SAFETY: Scratch and scene are distinct. Drawing is balanced before scratch is used as
+            // an input when compositing back into the scene.
+            unsafe {
+                self.context.SetTarget(&scratch);
+                self.context.BeginDraw();
+                self.context.Clear(Some(&raw const clear));
+                self.context.DrawImage(
+                    &output,
+                    Some(&raw const target_offset),
+                    Some(&raw const source),
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_COMPOSITE_MODE_SOURCE_COPY,
+                );
+            }
+            let scratch_result =
+                unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error);
+            // SAFETY: The effect output has been encoded; dropping its input removes the scene
+            // bitmap's source binding before it becomes the target again.
+            unsafe { effect.SetInput(0, None::<&ID2D1Image>, true) };
+            scratch_result?;
+
+            // SAFETY: Rebinds the scene after it is no longer an effect input.
+            unsafe {
+                self.context.SetTarget(scene_bitmap);
+                self.context.BeginDraw();
+            }
+            let own_clip = Clip::rounded(bounds, corner_radius);
+            let composite_result = self.draw_with_clip(ancestor_clip, |renderer| {
+                renderer.draw_with_clip(Some(own_clip), |renderer| {
+                    let destination = d2d_rect(plan.sample_bounds);
+                    let source = D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: plan.sample_bounds.size.width,
+                        bottom: plan.sample_bounds.size.height,
+                    };
+                    // SAFETY: The scratch bitmap is no longer bound as a target. COPY replaces the
+                    // original backdrop rather than alpha-compositing it a second time.
+                    unsafe {
+                        renderer
+                            .context
+                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+                        renderer.context.DrawBitmap(
+                            &scratch,
+                            Some(&raw const destination),
+                            1.0,
+                            D2D1_INTERPOLATION_MODE_LINEAR,
+                            Some(&raw const source),
+                            None,
+                        );
+                        renderer
+                            .context
+                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                    }
+                    Ok(1)
+                })?;
+                Ok(0)
+            });
+            if let Err(error) = composite_result {
+                // SAFETY: An error while constructing or drawing a clip still leaves the scene's
+                // BeginDraw active; close it before propagating the failure.
+                unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error)?;
+                return Err(error);
+            }
+            self.stats.backdrop_blur_operations =
+                self.stats.backdrop_blur_operations.saturating_add(1);
+            Ok(())
         }
 
         fn draw_command(&mut self, command: &DrawCommand) -> Result<(), RenderError> {
@@ -481,6 +794,7 @@ mod platform {
                     };
                     Ok(1)
                 }),
+                DrawCommand::BackdropBlur { .. } => Ok(()),
                 DrawCommand::Glyphs {
                     glyphs,
                     color,
@@ -762,6 +1076,84 @@ mod platform {
         // creation; the returned target retains the surface.
         unsafe { context.CreateBitmapFromDxgiSurface(&surface, Some(&raw const properties)) }
             .map_err(graphics_error)
+    }
+
+    fn create_composite_bitmap(
+        context: &ID2D1DeviceContext,
+        size: SurfaceSize,
+        scale: f32,
+    ) -> Result<ID2D1Bitmap1, RenderError> {
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0 * scale,
+            dpiY: 96.0 * scale,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let pixel_size = D2D_SIZE_U {
+            width: size.width(),
+            height: size.height(),
+        };
+        // SAFETY: The size is non-zero, no initial data is provided, and the bitmap remains in the
+        // creating context's resource domain. Omitting CANNOT_DRAW makes it a valid effect input.
+        unsafe { context.CreateBitmap(pixel_size, None, 0, &raw const properties) }
+            .map_err(graphics_error)
+    }
+
+    fn d2d_blur_plan(command: &DrawCommand, surface: SurfaceSize, scale: f32) -> Option<BlurPlan> {
+        let DrawCommand::BackdropBlur {
+            bounds,
+            sigma,
+            clip,
+            ..
+        } = command
+        else {
+            return None;
+        };
+        if !sigma.is_finite() || *sigma <= 0.0 {
+            return None;
+        }
+        let logical_surface = Rect::new(
+            anmixiu_scene::Point::new(0.0, 0.0),
+            anmixiu_scene::Size::new(
+                surface.width() as f32 / scale,
+                surface.height() as f32 / scale,
+            ),
+        );
+        let mut visible = bounds.intersection(logical_surface)?;
+        if let Some(clip) = clip {
+            visible = visible.intersection(clip.bounds)?;
+        }
+        let margin = sigma.min(MAX_BACKDROP_BLUR_SIGMA) * 3.0;
+        let min_x = ((visible.min_x() - margin) * scale).floor().max(0.0);
+        let min_y = ((visible.min_y() - margin) * scale).floor().max(0.0);
+        let max_x = ((visible.max_x() + margin) * scale)
+            .ceil()
+            .min(surface.width() as f32);
+        let max_y = ((visible.max_y() + margin) * scale)
+            .ceil()
+            .min(surface.height() as f32);
+        if max_x <= min_x || max_y <= min_y {
+            return None;
+        }
+        let scratch_size = SurfaceSize::new((max_x - min_x) as u32, (max_y - min_y) as u32).ok()?;
+        Some(BlurPlan {
+            sample_bounds: Rect::new(
+                anmixiu_scene::Point::new(min_x / scale, min_y / scale),
+                anmixiu_scene::Size::new((max_x - min_x) / scale, (max_y - min_y) / scale),
+            ),
+            scratch_size,
+        })
+    }
+
+    fn bitmap_bytes(size: SurfaceSize) -> usize {
+        usize::try_from(size.width())
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::try_from(size.height()).unwrap_or(usize::MAX))
+            .saturating_mul(4)
     }
 
     fn d2d_rect(rect: Rect) -> D2D_RECT_F {

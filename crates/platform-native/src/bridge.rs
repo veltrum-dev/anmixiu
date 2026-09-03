@@ -1028,6 +1028,14 @@ fn build_scene(
         let clip = scroll_clip.map_or(self_clip, |viewport| {
             Clip::rectangular(self_clip.bounds.intersection(viewport).unwrap_or(viewport))
         });
+        if let Some(sigma) = backdrop_sigma(paint_style) {
+            commands.push(DrawCommand::BackdropBlur {
+                bounds,
+                sigma,
+                corner_radius: paint_style.border_radius.value().max(0.0),
+                clip: scroll_clip.map(Clip::rectangular),
+            });
+        }
         push_box_commands_clipped(&mut commands, bounds, paint_style, scroll_clip);
         if let Some(shape) = shaped.get(&MeasureId(id.0)) {
             let glyphs = if offset_x == 0.0 && offset_y == 0.0 {
@@ -1439,6 +1447,10 @@ fn hash_style(style_value: &Style, style: &mut DefaultHasher, paint: &mut Defaul
     ] {
         value.to_bits().hash(paint);
     }
+    if let Some(sigma) = backdrop_sigma(style_value) {
+        0xB10B_u16.hash(paint);
+        sigma.to_bits().hash(paint);
+    }
     style_value
         .foreground
         .map(|color| {
@@ -1473,6 +1485,13 @@ fn hash_style(style_value: &Style, style: &mut DefaultHasher, paint: &mut Defaul
     ] {
         value.to_bits().hash(paint);
     }
+}
+
+fn backdrop_sigma(style: &Style) -> Option<f32> {
+    style
+        .backdrop_blur
+        .map(CorePixels::value)
+        .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
 }
 
 fn hash_refinement(value: Option<&StyleRefinement>, paint: &mut DefaultHasher) {

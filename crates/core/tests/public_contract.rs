@@ -893,6 +893,17 @@ fn px_returns_pixels_and_builders_preserve_the_concrete_unit() {
 }
 
 #[test]
+fn backdrop_blur_is_an_explicit_paint_only_logical_pixel_style() {
+    let plain = div();
+    assert_eq!(plain.style_ref().backdrop_blur, None);
+
+    let blurred = plain.backdrop_blur(px(16.0));
+    assert_eq!(blurred.style_ref().backdrop_blur, Some(px(16.0)));
+    assert_eq!(blurred.style_ref().width, None);
+    assert_eq!(blurred.style_ref().height, None);
+}
+
+#[test]
 fn window_typography_overrides_app_fields_independently_and_preserves_platform_default() {
     let app = Typography::new()
         .with_font_family("App Family")

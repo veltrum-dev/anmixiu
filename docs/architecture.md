@@ -170,6 +170,39 @@ scaling idle UI thread count to every logical CPU. Lifecycle methods and render 
 - Renderer resources: Metal retains bounded pipelines, atlas textures, and staging buffers; D3D11
   retains a hard-capacity LRU of Direct2D A8 atlas bitmaps keyed by atlas id and generation.
 
+## Backdrop effects and compositing
+
+`Style::backdrop_blur` is paint-only and stores a Gaussian sigma in logical pixels. The shared
+projection emits an ordered `DrawCommand::BackdropBlur` immediately before the element's border and
+background commands. Its semantic input is every preceding command in the current Scene; later
+commands, including the element's own fill, text, and descendants, remain unfiltered. Non-positive
+or non-finite style values emit no effect, and platform renderers clamp larger finite sigma values
+to the shared 64-logical-pixel ceiling.
+
+An effect command selects the compositor path. A Scene without effects keeps the existing direct
+surface render pass and creates no intermediate color textures. Metal effect frames render into a
+shader-readable scene texture, extract only the effect bounds plus the three-sigma sampling margin,
+run separable horizontal and vertical Gaussian passes, replace the rounded and ancestor-clipped
+backdrop region, then composite the completed scene into the framebuffer-only drawable. Large
+kernels are downsampled until the working sigma is at most eight physical pixels. Paired Gaussian
+weights use linear texture filtering to halve taps without changing the intended kernel.
+
+Metal retains three compositor slots so the UI thread never waits for GPU completion before reusing
+a writable render target. A slot records its last command buffer and becomes reusable only after
+Metal reports completion or failure. Across those slots, scene and blur textures have a 256 MiB hard
+budget and each Scene has a 64-effect hard limit. Each slot retains one scene texture and one blur
+texture pair sized for that frame's largest expanded effect region; ordered effects reuse the pair
+sequentially within the command buffer. Physical size or pixel-format mismatches replace the
+resource. `RenderStats` reports compositor frames, blur operations, and retained texture bytes.
+
+Direct2D follows the same ordered semantics. It uses a target bitmap without
+`D2D1_BITMAP_OPTIONS_CANNOT_DRAW`, ends drawing before binding that bitmap as the built-in Gaussian
+effect input, filters the expanded local region into a reusable scratch bitmap, clips and copies it
+back, and finally copies the completed scene to the swap-chain target. Surface or DPI changes release
+both intermediate bitmaps. The scene and scratch bitmap pair has the same 256 MiB budget and
+64-effect limit. Direct2D owns GPU hazard scheduling for these device-context resources; the UI
+thread never maps them or waits for completion.
+
 ## Native scale and refresh
 
 macOS frame requests are coalesced onto the `NSView` display link rather than drawn immediately by

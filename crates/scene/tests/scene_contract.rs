@@ -62,6 +62,12 @@ fn scene_preserves_platform_neutral_quad_glyph_and_upload_data() {
             border_width: 1.0,
             clip: Some(clip),
         },
+        DrawCommand::BackdropBlur {
+            bounds: rect(6.0, 6.0, 18.0, 18.0),
+            sigma: 8.0,
+            corner_radius: 3.0,
+            clip: Some(clip),
+        },
         DrawCommand::Glyphs {
             glyphs: Arc::from([Glyph::new(
                 rect(12.0, 13.0, 8.0, 10.0),
@@ -76,6 +82,37 @@ fn scene_preserves_platform_neutral_quad_glyph_and_upload_data() {
 
     assert_eq!(scene.commands(), commands.as_slice());
     assert_eq!(scene.atlas_uploads(), &[upload]);
+}
+
+#[test]
+fn scene_reports_whether_ordered_backdrop_effects_require_compositing() {
+    let plain = Scene::new(
+        vec![DrawCommand::SolidQuad {
+            bounds: rect(0.0, 0.0, 10.0, 10.0),
+            color: Color::WHITE,
+            clip: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    let blurred = Scene::new(
+        vec![DrawCommand::BackdropBlur {
+            bounds: rect(1.0, 1.0, 8.0, 8.0),
+            sigma: 4.0,
+            corner_radius: 2.0,
+            clip: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    let identical_plain = plain.clone();
+
+    assert!(!plain.requires_compositing());
+    assert_eq!(
+        plain, identical_plain,
+        "lazy effect metadata is not scene data"
+    );
+    assert!(blurred.requires_compositing());
 }
 
 #[test]
