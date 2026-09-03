@@ -400,6 +400,150 @@ fn button_label_is_centered_and_focus_ring_is_paint_only() {
 }
 
 #[test]
+fn focus_at_uses_the_topmost_click_target_and_invalidates_paint() {
+    let element = button("Focusable")
+        .width(px(120.0))
+        .height(px(44.0))
+        .id("focus-target")
+        .on_click(|| {})
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(160.0, 80.0), 1.0)
+        .unwrap();
+
+    assert!(builder.focus_at(&frame, Point::new(10.0, 10.0)));
+    assert_eq!(
+        builder.focused(),
+        Some(&GlobalElementId::new(["focus-target".into()]))
+    );
+    assert!(!builder.focus_at(&frame, Point::new(10.0, 10.0)));
+    assert!(builder.focus_at(&frame, Point::new(150.0, 70.0)));
+    assert!(builder.focused().is_none());
+}
+
+#[test]
+fn hover_only_parent_does_not_block_its_clickable_child() {
+    let element = div()
+        .width(px(120.0))
+        .height(px(80.0))
+        .hover(|style| style.background(Color::rgb(0.2, 0.3, 0.4)))
+        .id("hover-parent")
+        .child(
+            div()
+                .width(px(80.0))
+                .height(px(40.0))
+                .id("click-child")
+                .on_click(|| {}),
+        )
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(120.0, 80.0), 1.0)
+        .unwrap();
+    let point = Point::new(10.0, 10.0);
+
+    let hover = frame
+        .hover_target_at(point)
+        .expect("hover-only parent is hit");
+    assert_eq!(
+        frame.global_id(hover),
+        Some(&GlobalElementId::new(["hover-parent".into()]))
+    );
+    let click = frame
+        .click_target_at(point)
+        .expect("clickable child is hit");
+    assert_eq!(
+        frame.global_id(click),
+        Some(&GlobalElementId::new([
+            "hover-parent".into(),
+            "click-child".into(),
+        ]))
+    );
+}
+
+#[test]
+fn hover_reconciles_when_layout_moves_under_a_stationary_pointer() {
+    let transitions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let first_transitions = transitions.clone();
+    let first_element = button("Hover")
+        .width(px(100.0))
+        .height(px(40.0))
+        .id("moving-hover")
+        .on_hover_change(move |hovered| first_transitions.borrow_mut().push(hovered))
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let first = builder
+        .build(&first_element, Size::new(120.0, 120.0), 1.0)
+        .unwrap();
+    let point = Point::new(10.0, 10.0);
+    assert!(builder.update_hover(&first, Some(point)));
+
+    let second_transitions = transitions.clone();
+    let moved_element = div()
+        .child(div().height(px(60.0)))
+        .child(
+            button("Hover")
+                .width(px(100.0))
+                .height(px(40.0))
+                .id("moving-hover")
+                .on_hover_change(move |hovered| {
+                    second_transitions.borrow_mut().push(hovered);
+                }),
+        )
+        .into_element_node();
+    let moved = builder
+        .build(&moved_element, Size::new(120.0, 120.0), 1.0)
+        .unwrap();
+    assert!(builder.update_hover(&moved, Some(point)));
+    assert!(builder.hovered().is_none());
+    assert_eq!(*transitions.borrow(), vec![true, false]);
+}
+
+#[test]
+fn builtin_button_hover_feedback_does_not_require_an_explicit_id() {
+    let element = button("Hover without id")
+        .width(px(140.0))
+        .height(px(44.0))
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let normal = builder
+        .build(&element, Size::new(160.0, 80.0), 1.0)
+        .unwrap();
+    assert!(builder.update_hover(&normal, Some(Point::new(10.0, 10.0))));
+    let hovered = builder
+        .build(&element, Size::new(160.0, 80.0), 1.0)
+        .unwrap();
+
+    assert_ne!(normal.scene, hovered.scene);
+}
+
+#[test]
+fn handler_presence_invalidates_cached_hit_regions() {
+    let passive = div()
+        .width(px(100.0))
+        .height(px(40.0))
+        .id("dynamic-target")
+        .into_element_node();
+    let interactive = div()
+        .width(px(100.0))
+        .height(px(40.0))
+        .id("dynamic-target")
+        .on_click(|| {})
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let before = builder
+        .build(&passive, Size::new(120.0, 60.0), 1.0)
+        .unwrap();
+    assert!(before.click_target_at(Point::new(10.0, 10.0)).is_none());
+
+    let after = builder
+        .build(&interactive, Size::new(120.0, 60.0), 1.0)
+        .unwrap();
+    assert!(after.click_target_at(Point::new(10.0, 10.0)).is_some());
+}
+
+#[test]
 fn button_defaults_to_intrinsic_width_in_a_column() {
     let element = div()
         .width(px(300.0))

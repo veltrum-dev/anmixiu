@@ -125,6 +125,9 @@ priority (`high → normal → low`) and the live subscription count:
 cargo run --example event
 ```
 
+`Eventful` is an explicit root capability: launch an implementing component with
+`App::run_eventful`. Ordinary `App::run` does not inspect or bind optional traits.
+
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad
 deltas into a target and follows it on the display link, while the scene paints an unobtrusive
 overlay scrollbar for each overflowing axis.

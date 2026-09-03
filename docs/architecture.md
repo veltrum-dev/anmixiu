@@ -103,14 +103,19 @@ type while supporting optional subtrees, styles, and handlers.
 `Eventful` is an optional Element capability, separate from `Render` and `IntoElement`. A host that
 opts into the capability invokes `bind_events` once after the first frame is painted; the
 `EventBindings` value retains each RAII `Subscription` until unmount. Event payloads are ordinary
-Rust values routed by `TypeId`, never string topics. `EventScope::Tree` currently matches the
-originating owner exactly; ancestor propagation will be enabled when persistent Element parent
-links are available. `EventScope::Window` restricts delivery to the current window, while
-`EventScope::App` broadcasts through the App-owned router across windows.
+Rust values routed by `TypeId`, never string topics. `EventScope::Owner` matches the originating
+persistent Element owner exactly; a future tree-propagation scope will be added only when persistent
+Element parent links are available. `EventScope::Window` restricts delivery to the current window,
+while `EventScope::App` broadcasts through the App-owned router across windows.
 
 Subscriptions carry an `EventPriority`. Higher values dispatch first; equal priorities retain
-registration order. Nested emissions are queued FIFO with a hard capacity, and callbacks are
-invoked without holding the router's mutable borrow so a handler can emit or unsubscribe safely.
+registration order. Nested emissions are queued FIFO with a hard pending capacity and a bounded
+number of deliveries per synchronous turn, so a feedback loop cannot monopolize the UI thread.
+Callbacks are invoked without holding the router's mutable borrow so a handler can emit or
+unsubscribe safely. Panic guards restore an in-flight callback and discard its queued nested work.
+Subscription cancellation also unregisters its owner cleanup immediately, keeping dynamic churn
+bounded for the owner's lifetime.
+
 The router exposes read-only subscription metadata snapshots for diagnostics; event payload values
 are never retained as state.
 

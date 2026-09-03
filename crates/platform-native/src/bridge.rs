@@ -39,6 +39,7 @@ struct ProjectedNode {
     hover_handler: Option<HoverHandler>,
     hover_style: Option<StyleRefinement>,
     clickable: bool,
+    hoverable: bool,
     is_button: bool,
     scroll: Option<ScrollHandle>,
 }
@@ -49,12 +50,36 @@ struct Projection {
     fingerprints: Fingerprints,
 }
 
+struct FrameInteractions {
+    handlers: HashMap<HitId, ClickHandler>,
+    element_ids: HashMap<HitId, GlobalElementId>,
+    hover_handlers: HashMap<GlobalElementId, HoverHandler>,
+    cursor_styles: HashMap<HitId, CursorStyle>,
+    click_targets: HashSet<HitId>,
+    hover_targets: HashSet<HitId>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Fingerprints {
     structure: u64,
     style: u64,
     measure: u64,
     paint: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HoverTarget {
+    Semantic(GlobalElementId),
+    Transient(HitId),
+}
+
+impl HoverTarget {
+    fn matches(&self, id: HitId, global_id: Option<&GlobalElementId>) -> bool {
+        match self {
+            Self::Semantic(hovered) => global_id == Some(hovered),
+            Self::Transient(hovered) => *hovered == id,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +110,8 @@ pub struct BuiltFrame {
     element_ids: HashMap<HitId, GlobalElementId>,
     hover_handlers: HashMap<GlobalElementId, HoverHandler>,
     cursor_styles: HashMap<HitId, CursorStyle>,
+    click_targets: HashSet<HitId>,
+    hover_targets: HashSet<HitId>,
     scroll_regions: Vec<ScrollRegion>,
 }
 
@@ -92,6 +119,27 @@ impl BuiltFrame {
     #[must_use]
     pub fn handler(&self, hit: HitId) -> Option<&ClickHandler> {
         self.handlers.get(&hit)
+    }
+
+    /// Returns the frontmost click-capable target at `point`.
+    #[must_use]
+    pub fn click_target_at(&self, point: Point) -> Option<HitId> {
+        self.target_at(point, &self.click_targets)
+    }
+
+    /// Returns the frontmost hover-capable target at `point`.
+    #[must_use]
+    pub fn hover_target_at(&self, point: Point) -> Option<HitId> {
+        self.target_at(point, &self.hover_targets)
+    }
+
+    fn target_at(&self, point: Point, targets: &HashSet<HitId>) -> Option<HitId> {
+        self.scene
+            .hit_regions()
+            .iter()
+            .rev()
+            .find(|region| targets.contains(&region.id) && region.contains(point))
+            .map(|region| region.id)
     }
 
     /// Routes a vertical wheel delta to the innermost scroll container under `point`.
@@ -195,7 +243,8 @@ pub struct FrameBuilder {
     revisions: LayoutRevisions,
     layout_generation: u64,
     paint_generation: u64,
-    hovered: Option<GlobalElementId>,
+    hovered: Option<HoverTarget>,
+    hover_handler: Option<HoverHandler>,
     focused: Option<GlobalElementId>,
     #[cfg(feature = "devtools")]
     inspected: Option<String>,
@@ -239,6 +288,7 @@ impl FrameBuilder {
             layout_generation: 0,
             paint_generation: 0,
             hovered: None,
+            hover_handler: None,
             focused: None,
             #[cfg(feature = "devtools")]
             inspected: None,
@@ -332,31 +382,16 @@ impl FrameBuilder {
                 debug_selection,
             )
         });
-        let mut handlers = HashMap::new();
-        let mut element_ids = HashMap::new();
-        let mut hover_handlers = HashMap::new();
-        let mut cursor_styles = HashMap::new();
-        for node in projection.nodes {
-            if let Some(handler) = node.handler {
-                handlers.insert(HitId(node.id.0), handler);
-            }
-            if let Some(global_id) = node.global_id {
-                if let Some(handler) = node.hover_handler {
-                    hover_handlers.insert(global_id.clone(), handler);
-                }
-                element_ids.insert(HitId(node.id.0), global_id);
-            }
-            if node.clickable {
-                cursor_styles.insert(HitId(node.id.0), node.style.cursor);
-            }
-        }
+        let interactions = collect_interactions(projection.nodes);
         Ok(BuiltFrame {
             layout,
             scene,
-            handlers,
-            element_ids,
-            hover_handlers,
-            cursor_styles,
+            handlers: interactions.handlers,
+            element_ids: interactions.element_ids,
+            hover_handlers: interactions.hover_handlers,
+            cursor_styles: interactions.cursor_styles,
+            click_targets: interactions.click_targets,
+            hover_targets: interactions.hover_targets,
             scroll_regions,
         })
     }
@@ -406,11 +441,48 @@ impl FrameBuilder {
     ///
     /// Returns whether a new paint revision was requested. Layout revisions are untouched.
     pub fn set_hovered(&mut self, hovered: Option<GlobalElementId>) -> bool {
+        let hovered = hovered.map(HoverTarget::Semantic);
         if self.hovered == hovered {
             return false;
         }
         self.hovered = hovered;
+        self.hover_handler = None;
         self.paint_generation = self.paint_generation.saturating_add(1);
+        true
+    }
+
+    /// Reconciles hover against the latest frame and invokes enter/leave handlers once.
+    ///
+    /// Passing `None` means the pointer is outside the native content view. Retaining the active
+    /// leave handler here lets a removed or moved element receive its final `false` transition
+    /// even when it is no longer present in the newest frame.
+    pub fn update_hover(&mut self, frame: &BuiltFrame, point: Option<Point>) -> bool {
+        let hit = point.and_then(|point| frame.hover_target_at(point));
+        let hovered = hit.map(|hit| {
+            frame
+                .global_id(hit)
+                .cloned()
+                .map_or(HoverTarget::Transient(hit), HoverTarget::Semantic)
+        });
+        let next_handler = hit
+            .and_then(|hit| frame.global_id(hit))
+            .and_then(|id| frame.hover_handler(id))
+            .cloned();
+        if self.hovered == hovered {
+            self.hover_handler = next_handler;
+            return false;
+        }
+
+        let previous_handler = self.hover_handler.take();
+        self.hovered = hovered;
+        self.hover_handler.clone_from(&next_handler);
+        self.paint_generation = self.paint_generation.saturating_add(1);
+        if let Some(handler) = previous_handler {
+            handler.invoke(false);
+        }
+        if let Some(handler) = next_handler {
+            handler.invoke(true);
+        }
         true
     }
 
@@ -424,9 +496,26 @@ impl FrameBuilder {
         true
     }
 
+    /// Focuses the frontmost click target at `point`, or clears focus over empty space.
+    pub fn focus_at(&mut self, frame: &BuiltFrame, point: Point) -> bool {
+        let focused = frame
+            .click_target_at(point)
+            .and_then(|hit| frame.global_id(hit))
+            .cloned();
+        self.set_focused(focused)
+    }
+
     #[must_use]
     pub const fn hovered(&self) -> Option<&GlobalElementId> {
-        self.hovered.as_ref()
+        match self.hovered.as_ref() {
+            Some(HoverTarget::Semantic(id)) => Some(id),
+            Some(HoverTarget::Transient(_)) | None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn focused(&self) -> Option<&GlobalElementId> {
+        self.focused.as_ref()
     }
 
     #[cfg(feature = "devtools")]
@@ -724,6 +813,41 @@ fn project(element: &ElementNode) -> Result<Projection, FrameBuildError> {
     })
 }
 
+fn collect_interactions(nodes: Vec<ProjectedNode>) -> FrameInteractions {
+    let mut interactions = FrameInteractions {
+        handlers: HashMap::new(),
+        element_ids: HashMap::new(),
+        hover_handlers: HashMap::new(),
+        cursor_styles: HashMap::new(),
+        click_targets: HashSet::new(),
+        hover_targets: HashSet::new(),
+    };
+    for node in nodes {
+        let hit = HitId(node.id.0);
+        if let Some(handler) = node.handler {
+            interactions.handlers.insert(hit, handler);
+        }
+        if let Some(global_id) = node.global_id {
+            if let Some(handler) = node.hover_handler {
+                interactions
+                    .hover_handlers
+                    .insert(global_id.clone(), handler);
+            }
+            interactions.element_ids.insert(hit, global_id);
+        }
+        if node.clickable {
+            interactions.click_targets.insert(hit);
+        }
+        if node.hoverable {
+            interactions.hover_targets.insert(hit);
+        }
+        if node.clickable || node.hoverable {
+            interactions.cursor_styles.insert(hit, node.style.cursor);
+        }
+    }
+    interactions
+}
+
 fn project_node(
     element: &ElementNode,
     inherited_foreground: CoreColor,
@@ -767,16 +891,22 @@ fn project_node(
             )?);
         }
     }
+    let handler = element.click_handler().cloned();
+    let hover_handler = element.hover_handler().cloned();
+    let hover_style = element.hover_style().cloned();
+    let clickable = element.kind_name() == "button" || handler.is_some();
+    let hoverable = hover_handler.is_some() || hover_style.is_some();
     nodes.push(ProjectedNode {
         id,
         parent,
         global_id,
         style,
         text,
-        handler: element.click_handler().cloned(),
-        hover_handler: element.hover_handler().cloned(),
-        hover_style: element.hover_style().cloned(),
-        clickable: element.kind_name() == "button" || element.click_handler().is_some(),
+        handler,
+        hover_handler,
+        hover_style,
+        clickable,
+        hoverable,
         is_button: element.kind_name() == "button",
         scroll: element.scroll_handle().cloned(),
     });
@@ -842,7 +972,7 @@ fn build_scene(
     layout: &LayoutTree,
     shaped: &HashMap<MeasureId, ShapedText>,
     latest_upload: Option<AtlasUpload>,
-    hovered: Option<&GlobalElementId>,
+    hovered: Option<&HoverTarget>,
     focused: Option<&GlobalElementId>,
     debug_selection: DebugSelection<'_>,
 ) -> Scene {
@@ -870,7 +1000,9 @@ fn build_scene(
                 raw_bounds.size,
             )
         };
-        let hover_style = if node.global_id.as_ref() == hovered {
+        let hover_style = if hovered
+            .is_some_and(|hovered| hovered.matches(HitId(node.id.0), node.global_id.as_ref()))
+        {
             node.hover_style.as_ref().map(|refinement| {
                 let mut style = node.style.clone();
                 refinement.apply_to(&mut style);
@@ -898,7 +1030,7 @@ fn build_scene(
                 clip: Some(clip),
             });
         }
-        if node.clickable {
+        if node.clickable || node.hoverable {
             hits.push(HitRegion::new(HitId(id.0), bounds, Some(clip)));
         }
         if node.global_id.as_ref() == focused {
@@ -1276,6 +1408,8 @@ fn hash_element(
     element.text_content().hash(paint);
     hash_style(element.style_ref(), style, paint);
     hash_refinement(element.hover_style(), paint);
+    element.click_handler().is_some().hash(paint);
+    element.hover_handler().is_some().hash(paint);
     for child in element.children_ref() {
         hash_element(child, structure, style, measure, paint);
     }

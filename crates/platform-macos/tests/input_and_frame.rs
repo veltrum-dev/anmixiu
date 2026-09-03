@@ -8,7 +8,9 @@ use anmixiu_platform_macos::{
 #[test]
 fn click_requires_press_and_release_on_same_topmost_target() {
     let mut pointer = PointerTracker::default();
+    assert!(!pointer.is_inside());
     pointer.update_position(20.0, 30.0);
+    assert!(pointer.is_inside());
     assert_eq!(pointer.phase(), PointerPhase::Moving);
     pointer.press(Some(7));
     assert_eq!(pointer.phase(), PointerPhase::Pressed);
@@ -17,6 +19,8 @@ fn click_requires_press_and_release_on_same_topmost_target() {
     pointer.press(Some(7));
     assert_eq!(pointer.release(Some(7)), Some(7));
     assert_eq!(pointer.phase(), PointerPhase::Released);
+    pointer.exit();
+    assert!(!pointer.is_inside());
 }
 
 #[test]

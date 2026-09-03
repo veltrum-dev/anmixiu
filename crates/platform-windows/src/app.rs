@@ -246,6 +246,9 @@ impl App {
 
     /// Creates one native Win32 window and blocks in its message loop until it closes.
     ///
+    /// This path does not bind the optional [`Eventful`] capability. Components implementing it
+    /// must be launched with [`run_eventful`](Self::run_eventful).
+    ///
     /// # Errors
     ///
     /// Returns an error when runtime, window, text, or graphics initialization fails, when a
@@ -258,6 +261,10 @@ impl App {
     /// Starts Win32 with the root Element's optional [`Eventful`] capability enabled.
     ///
     /// [`Eventful::bind_events`] is invoked once after the first frame is painted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same startup, rendering, and render-loop errors as [`run`](Self::run).
     pub fn run_eventful<C: Render + Eventful>(self, root: C) -> Result<(), AppError> {
         self.run_internal(root, Some(register_eventful::<C>))
     }
@@ -553,11 +560,22 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
                 .expect("a requested frame has a rendered root");
             let (logical_width, logical_height) = state.viewport.logical_size();
             let scale = state.viewport.scale();
-            let frame = state.frame_builder.build(
+            let mut frame = state.frame_builder.build(
                 element.as_ref(),
                 Size::new(logical_width, logical_height),
                 scale,
             )?;
+            let hover_point = state.pointer.is_inside().then(|| {
+                let (x, y) = state.pointer.position();
+                Point::new(x, y)
+            });
+            if state.frame_builder.update_hover(&frame, hover_point) {
+                frame = state.frame_builder.build(
+                    element.as_ref(),
+                    Size::new(logical_width, logical_height),
+                    scale,
+                )?;
+            }
             let surface = Self::surface_size(state.viewport);
             let renderer = state.renderer.as_mut().expect("checked above");
             let outcome = renderer.render(&frame.scene, surface, scale)?;
@@ -649,31 +667,17 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
     fn pointer_moved(&self, point: Point) {
         let mut state = self.state.borrow_mut();
         state.pointer.update_position(point.x, point.y);
-        let previous = state.frame_builder.hovered().cloned();
-        let hovered = state
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.scene.hit_test(point))
-            .and_then(|hit| {
-                state
-                    .frame
-                    .as_ref()
-                    .and_then(|frame| frame.global_id(hit).cloned())
-            });
-        let changed = state.frame_builder.set_hovered(hovered);
+        let changed = {
+            let DriverState {
+                frame_builder,
+                frame,
+                ..
+            } = &mut *state;
+            frame
+                .as_ref()
+                .is_some_and(|frame| frame_builder.update_hover(frame, Some(point)))
+        };
         if changed {
-            if let Some(frame) = state.frame.as_ref() {
-                if let Some(previous) = previous.as_ref()
-                    && let Some(handler) = frame.hover_handler(previous)
-                {
-                    handler.invoke(false);
-                }
-                if let Some(hovered) = state.frame_builder.hovered()
-                    && let Some(handler) = frame.hover_handler(hovered)
-                {
-                    handler.invoke(true);
-                }
-            }
             state.needs_frame = true;
         }
         drop(state);
@@ -699,15 +703,18 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
 
     fn pointer_exited(&self) {
         let mut state = self.state.borrow_mut();
-        let previous = state.frame_builder.hovered().cloned();
-        let changed = state.frame_builder.set_hovered(None);
+        state.pointer.exit();
+        let changed = {
+            let DriverState {
+                frame_builder,
+                frame,
+                ..
+            } = &mut *state;
+            frame
+                .as_ref()
+                .is_some_and(|frame| frame_builder.update_hover(frame, None))
+        };
         if changed {
-            if let Some(previous) = previous.as_ref()
-                && let Some(frame) = state.frame.as_ref()
-                && let Some(handler) = frame.hover_handler(previous)
-            {
-                handler.invoke(false);
-            }
             state.needs_frame = true;
         }
         drop(state);
@@ -722,7 +729,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         let hit = state
             .frame
             .as_ref()
-            .and_then(|frame| frame.scene.hit_test(point));
+            .and_then(|frame| frame.click_target_at(point));
         let focused = hit.and_then(|hit| {
             state
                 .frame
@@ -731,6 +738,23 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         });
         state.pressed_element.clone_from(&focused);
         state.pointer.press(hit.map(|hit| hit.0));
+        let focus_changed = {
+            let DriverState {
+                frame_builder,
+                frame,
+                ..
+            } = &mut *state;
+            frame
+                .as_ref()
+                .is_some_and(|frame| frame_builder.focus_at(frame, point))
+        };
+        if focus_changed {
+            state.needs_frame = true;
+        }
+        drop(state);
+        if focus_changed {
+            request_display();
+        }
     }
 
     fn pointer_up(&self, point: Point) {
@@ -739,7 +763,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
         let target = state
             .frame
             .as_ref()
-            .and_then(|frame| frame.scene.hit_test(point));
+            .and_then(|frame| frame.click_target_at(point));
         let current = target.and_then(|hit| {
             state
                 .frame
@@ -774,6 +798,7 @@ impl<C: Render> NativeDriver for ComponentDriver<C> {
 
     fn scroll(&self, point: Point, delta_x: f32, delta_y: f32) {
         let mut state = self.state.borrow_mut();
+        state.pointer.update_position(point.x, point.y);
         let consumed = state
             .frame
             .as_ref()

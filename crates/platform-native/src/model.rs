@@ -12,12 +12,14 @@ pub struct PointerTracker {
     position: (f32, f32),
     pressed_target: Option<u64>,
     phase: PointerPhase,
+    inside: bool,
 }
 
 impl PointerTracker {
     pub fn update_position(&mut self, x: f32, y: f32) {
         self.position = (x, y);
         self.phase = PointerPhase::Moving;
+        self.inside = true;
     }
 
     pub fn press(&mut self, target: Option<u64>) {
@@ -32,6 +34,13 @@ impl PointerTracker {
         clicked
     }
 
+    /// Marks the pointer as outside the native content view.
+    pub fn exit(&mut self) {
+        self.pressed_target = None;
+        self.phase = PointerPhase::Idle;
+        self.inside = false;
+    }
+
     #[must_use]
     pub const fn position(&self) -> (f32, f32) {
         self.position
@@ -40,6 +49,11 @@ impl PointerTracker {
     #[must_use]
     pub const fn phase(&self) -> PointerPhase {
         self.phase
+    }
+
+    #[must_use]
+    pub const fn is_inside(&self) -> bool {
+        self.inside
     }
 }
 

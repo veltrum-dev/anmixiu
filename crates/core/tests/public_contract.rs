@@ -1,15 +1,16 @@
 use std::{
     cell::{Cell, RefCell},
     future::{pending, ready},
+    panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
 };
 
 use anmixiu_core::{
     AppEvents, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element, ElementId,
-    ElementNode, EventPriority, EventScope, Eventful, FluentBuilder, FrameBatcher,
-    InteractiveElement, NodeId, ParentElement, Pixels, Render, RenderOnce, SharedString, State,
-    StatefulInteractiveElement, Styled, Typography, WindowId, WindowStateStore, button, div, px,
-    shared_format, text,
+    ElementNode, EventError, EventPriority, EventScope, Eventful, FluentBuilder, FrameBatcher,
+    InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, NodeId, ParentElement, Pixels,
+    Render, RenderOnce, SharedString, State, StatefulInteractiveElement, Styled, Typography,
+    WindowId, WindowStateStore, button, div, px, shared_format, text,
 };
 use anmixiu_reactive::OwnerRegistry;
 use anmixiu_reactive::Signal;
@@ -277,6 +278,166 @@ fn nested_events_are_queued_fifo_without_reentrant_router_borrowing() {
 
     events.emit(Ping, EventScope::App).expect("event dispatch");
     assert_eq!(*calls.borrow(), vec!["ping", "follow-up"]);
+}
+
+#[test]
+fn event_feedback_loops_stop_at_the_dispatch_budget() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let delivered = Rc::new(Cell::new(0));
+    let delivered_for_handler = delivered.clone();
+    let nested_events = events.clone();
+    let _subscription = cx.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+        delivered_for_handler.set(delivered_for_handler.get() + 1);
+        nested_events
+            .emit(Ping, EventScope::App)
+            .expect("one nested event fits in the pending queue");
+    });
+
+    assert_eq!(
+        events.emit(Ping, EventScope::App),
+        Err(EventError::DispatchLimitExceeded {
+            limit: MAX_EVENTS_PER_DISPATCH,
+        })
+    );
+    assert_eq!(delivered.get(), MAX_EVENTS_PER_DISPATCH);
+}
+
+#[test]
+fn callback_and_pending_queue_recover_after_a_caught_panic() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let ping_calls = Rc::new(Cell::new(0));
+    let follow_up_calls = Rc::new(Cell::new(0));
+
+    let follow_up_calls_for_handler = follow_up_calls.clone();
+    let _follow_up = cx.subscribe::<FollowUp, _>(EventScope::App, 0, move |_| {
+        follow_up_calls_for_handler.set(follow_up_calls_for_handler.get() + 1);
+    });
+    let panic_once = Rc::new(Cell::new(true));
+    let panic_once_for_handler = panic_once.clone();
+    let ping_calls_for_handler = ping_calls.clone();
+    let nested_events = events.clone();
+    let _ping = cx.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+        ping_calls_for_handler.set(ping_calls_for_handler.get() + 1);
+        if panic_once_for_handler.replace(false) {
+            nested_events
+                .emit(FollowUp, EventScope::App)
+                .expect("nested event queues before panic");
+            panic!("event handler panic");
+        }
+    });
+
+    assert!(catch_unwind(AssertUnwindSafe(|| events.emit(Ping, EventScope::App))).is_err());
+    assert_eq!(ping_calls.get(), 1);
+    assert_eq!(follow_up_calls.get(), 0, "panic clears queued nested work");
+
+    events
+        .emit(Ping, EventScope::App)
+        .expect("router remains usable after caught panic");
+    assert_eq!(ping_calls.get(), 2, "panicking callback was restored");
+    assert_eq!(
+        follow_up_calls.get(),
+        0,
+        "stale nested work was not replayed"
+    );
+}
+
+#[test]
+fn pending_event_queue_rejects_work_beyond_its_capacity() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let nested_error = Rc::new(RefCell::new(None));
+    let nested_error_for_handler = nested_error.clone();
+    let nested_events = events.clone();
+    let _subscription = cx.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
+        for _ in 0..=MAX_PENDING_EVENTS {
+            if let Err(error) = nested_events.emit(FollowUp, EventScope::App) {
+                nested_error_for_handler.replace(Some(error));
+                break;
+            }
+        }
+    });
+
+    assert_eq!(
+        events.emit(Ping, EventScope::App),
+        Err(EventError::DispatchLimitExceeded {
+            limit: MAX_EVENTS_PER_DISPATCH,
+        })
+    );
+    assert_eq!(
+        *nested_error.borrow(),
+        Some(EventError::QueueFull {
+            capacity: MAX_PENDING_EVENTS,
+        })
+    );
+}
+
+#[test]
+fn a_subscription_can_cancel_itself_during_dispatch() {
+    let cx = Context::<LifecycleProbe>::testing();
+    let events = cx.event_context();
+    let calls = Rc::new(Cell::new(0));
+    let subscription = Rc::new(RefCell::new(None));
+    let subscription_for_handler = subscription.clone();
+    let calls_for_handler = calls.clone();
+    subscription.replace(Some(cx.subscribe::<Ping, _>(
+        EventScope::App,
+        0,
+        move |_| {
+            calls_for_handler.set(calls_for_handler.get() + 1);
+            subscription_for_handler.borrow_mut().take();
+        },
+    )));
+
+    events.emit(Ping, EventScope::App).unwrap();
+    events.emit(Ping, EventScope::App).unwrap();
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn owner_scoped_events_do_not_reach_sibling_owners_in_one_window() {
+    let events = AppEvents::new();
+    let first = Context::<LifecycleProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events.clone(),
+        WindowId::new(1),
+    );
+    let second = Context::<LifecycleProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events,
+        WindowId::new(1),
+    );
+    let first_calls = Rc::new(Cell::new(0));
+    let second_calls = Rc::new(Cell::new(0));
+    let first_calls_for_handler = first_calls.clone();
+    let _first = first.subscribe::<Ping, _>(EventScope::Owner, 0, move |_| {
+        first_calls_for_handler.set(first_calls_for_handler.get() + 1);
+    });
+    let second_calls_for_handler = second_calls.clone();
+    let _second = second.subscribe::<Ping, _>(EventScope::Owner, 0, move |_| {
+        second_calls_for_handler.set(second_calls_for_handler.get() + 1);
+    });
+
+    first
+        .emit(Ping, EventScope::Owner)
+        .expect("owner event dispatches");
+    assert_eq!(first_calls.get(), 1);
+    assert_eq!(second_calls.get(), 0);
+}
+
+#[test]
+fn dropping_dynamic_subscriptions_removes_their_owner_cleanup() {
+    let cx = Context::<LifecycleProbe>::testing();
+
+    for _ in 0..100 {
+        drop(cx.subscribe::<Ping, _>(EventScope::App, 0, |_| {}));
+    }
+
+    assert_eq!(cx.event_context().subscription_count(), 0);
+    assert_eq!(cx.owner_registry().stats().cleanup_count, 0);
 }
 
 #[test]

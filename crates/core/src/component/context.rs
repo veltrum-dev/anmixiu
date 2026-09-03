@@ -191,12 +191,17 @@ impl<C: 'static> Context<C> {
     ///
     /// # Errors
     ///
-    /// Returns [`EventError::QueueFull`] when nested dispatch has reached its bounded queue.
+    /// Returns [`EventError::QueueFull`] when nested dispatch fills the pending queue, or
+    /// [`EventError::DispatchLimitExceeded`] when one synchronous turn exhausts its delivery
+    /// budget.
     pub fn emit<E: 'static>(&self, payload: E, scope: EventScope) -> Result<(), EventError> {
         self.event_context().emit(payload, scope)
     }
 
     /// Subscribes this Element owner to an event type.
+    ///
+    /// Retain the returned handle for as long as delivery is wanted. Dropping it cancels the
+    /// subscription immediately; [`crate::EventBindings`] retains mount-lifetime subscriptions.
     pub fn subscribe<E, F>(
         &self,
         scope: EventScope,

@@ -6,22 +6,21 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use anmixiu_reactive::{OwnerId, OwnerRegistry};
+use anmixiu_reactive::{OwnerCleanup, OwnerId, OwnerRegistry};
 
 use crate::WindowId;
 
 /// Hard upper bound for nested events waiting to be delivered by one app event router.
 pub const MAX_PENDING_EVENTS: usize = 4_096;
 
+/// Hard upper bound for events delivered by one synchronous dispatch turn.
+pub const MAX_EVENTS_PER_DISPATCH: usize = 4_096;
+
 /// Selects the routing scope for an event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EventScope {
     /// Delivers to subscriptions owned by the same persistent Element.
-    ///
-    /// Descendant-to-ancestor propagation will use the same scope once the persistent Element tree
-    /// supplies parent owner links. The first event implementation deliberately keeps this exact
-    /// owner match so a missing tree link cannot accidentally become a window-wide broadcast.
-    Tree,
+    Owner,
     /// Delivers to subscriptions in the current Window.
     Window,
     /// Delivers to subscriptions in the whole App, including every Window.
@@ -62,11 +61,13 @@ impl From<i32> for EventPriority {
     }
 }
 
-/// Error returned when event dispatch cannot accept another queued event.
+/// Error returned when event dispatch cannot accept or synchronously deliver more work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventError {
     /// Nested event delivery reached the bounded queue capacity.
     QueueFull { capacity: usize },
+    /// One synchronous event turn exhausted its delivery budget.
+    DispatchLimitExceeded { limit: usize },
 }
 
 impl fmt::Display for EventError {
@@ -74,6 +75,12 @@ impl fmt::Display for EventError {
         match self {
             Self::QueueFull { capacity } => {
                 write!(formatter, "event queue reached its capacity of {capacity}")
+            }
+            Self::DispatchLimitExceeded { limit } => {
+                write!(
+                    formatter,
+                    "event dispatch reached its delivery limit of {limit}"
+                )
             }
         }
     }
@@ -199,6 +206,7 @@ impl AppEvents {
             state: Rc::new(SubscriptionState {
                 router: Rc::downgrade(&self.inner),
                 id: Cell::new(Some(id)),
+                cleanup: RefCell::new(None),
             }),
         }
     }
@@ -233,14 +241,27 @@ impl AppEvents {
         if self.inner.dispatching.replace(true) {
             return Ok(());
         }
-        let _dispatch_guard = DispatchGuard(self.inner.clone());
+        let mut dispatch_guard = DispatchGuard::new(self.inner.clone());
+        let mut delivered = 0;
         loop {
+            if delivered == MAX_EVENTS_PER_DISPATCH {
+                let mut pending = self.inner.pending.borrow_mut();
+                if !pending.is_empty() {
+                    pending.clear();
+                    dispatch_guard.complete();
+                    return Err(EventError::DispatchLimitExceeded {
+                        limit: MAX_EVENTS_PER_DISPATCH,
+                    });
+                }
+            }
             let next = self.inner.pending.borrow_mut().pop_front();
             let Some(event) = next else {
                 break;
             };
+            delivered += 1;
             self.dispatch(&event);
         }
+        dispatch_guard.complete();
         Ok(())
     }
 
@@ -272,19 +293,18 @@ impl AppEvents {
         };
 
         for id in subscribers {
-            let mut callback = {
+            let callback = {
                 let mut subscriptions = self.inner.subscriptions.borrow_mut();
                 subscriptions
                     .get_mut(&id)
                     .and_then(|subscriber| subscriber.callback.take())
             };
-            let Some(mut callback) = callback.take() else {
+            let Some(callback) = callback else {
                 continue;
             };
-            callback(event.payload.as_ref());
-            let mut subscriptions = self.inner.subscriptions.borrow_mut();
-            if let Some(subscriber) = subscriptions.get_mut(&id) {
-                subscriber.callback = Some(callback);
+            let mut callback = CallbackLease::new(self.inner.clone(), id, callback);
+            if let Some(callback) = callback.callback.as_mut() {
+                callback(event.payload.as_ref());
             }
         }
     }
@@ -319,8 +339,8 @@ impl Subscriber {
     fn matches(&self, event: &QueuedEvent) -> bool {
         self.type_id == event.type_id
             && match event.scope {
-                EventScope::Tree => {
-                    self.scope == EventScope::Tree
+                EventScope::Owner => {
+                    self.scope == EventScope::Owner
                         && self.window_id == event.window_id
                         && self.owner == event.owner
                 }
@@ -350,17 +370,64 @@ struct QueuedEvent {
     payload: Box<dyn Any>,
 }
 
-struct DispatchGuard(Rc<EventRouterInner>);
+struct DispatchGuard {
+    inner: Rc<EventRouterInner>,
+    completed: bool,
+}
+
+impl DispatchGuard {
+    fn new(inner: Rc<EventRouterInner>) -> Self {
+        Self {
+            inner,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
 
 impl Drop for DispatchGuard {
     fn drop(&mut self) {
-        self.0.dispatching.set(false);
+        if !self.completed {
+            self.inner.pending.borrow_mut().clear();
+        }
+        self.inner.dispatching.set(false);
+    }
+}
+
+struct CallbackLease {
+    inner: Rc<EventRouterInner>,
+    id: u64,
+    callback: Option<EventCallback>,
+}
+
+impl CallbackLease {
+    fn new(inner: Rc<EventRouterInner>, id: u64, callback: EventCallback) -> Self {
+        Self {
+            inner,
+            id,
+            callback: Some(callback),
+        }
+    }
+}
+
+impl Drop for CallbackLease {
+    fn drop(&mut self) {
+        let Some(callback) = self.callback.take() else {
+            return;
+        };
+        if let Some(subscriber) = self.inner.subscriptions.borrow_mut().get_mut(&self.id) {
+            subscriber.callback = Some(callback);
+        }
     }
 }
 
 struct SubscriptionState {
     router: Weak<EventRouterInner>,
     id: Cell<Option<u64>>,
+    cleanup: RefCell<Option<OwnerCleanup>>,
 }
 
 impl SubscriptionState {
@@ -371,10 +438,12 @@ impl SubscriptionState {
         if let Some(router) = self.router.upgrade() {
             AppEvents { inner: router }.remove(id);
         }
+        self.cleanup.borrow_mut().take();
     }
 }
 
 /// RAII handle for one event subscription.
+#[must_use = "dropping the subscription immediately cancels it"]
 pub struct Subscription {
     state: Rc<SubscriptionState>,
 }
@@ -471,13 +540,18 @@ impl EventContext {
     ///
     /// # Errors
     ///
-    /// Returns [`EventError::QueueFull`] when nested dispatch has reached its bounded queue.
+    /// Returns [`EventError::QueueFull`] when nested dispatch fills the pending queue, or
+    /// [`EventError::DispatchLimitExceeded`] when one synchronous turn exhausts its delivery
+    /// budget.
     pub fn emit<E: 'static>(&self, payload: E, scope: EventScope) -> Result<(), EventError> {
         self.app_events
             .emit(self.owner, self.window_id, payload, scope)
     }
 
     /// Subscribes the current owner to an event type.
+    ///
+    /// Retain the returned handle for as long as delivery is wanted. Dropping it cancels the
+    /// subscription immediately; use [`EventBindings::subscribe`] for mount-lifetime retention.
     pub fn subscribe<E, F>(
         &self,
         scope: EventScope,
@@ -492,12 +566,14 @@ impl EventContext {
             self.app_events
                 .subscribe(self.owner, self.window_id, scope, priority.into(), handler);
         let weak = Rc::downgrade(&subscription.state);
-        let registered = self.registry.register_cleanup(self.owner, move || {
+        let cleanup = self.registry.register_cleanup_handle(self.owner, move || {
             if let Some(state) = weak.upgrade() {
                 state.cancel();
             }
         });
-        if !registered {
+        if let Some(cleanup) = cleanup {
+            subscription.state.cleanup.borrow_mut().replace(cleanup);
+        } else {
             subscription.state.cancel();
         }
         subscription

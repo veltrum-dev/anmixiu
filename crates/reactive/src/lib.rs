@@ -7,7 +7,7 @@
 //! owners; they never render components directly.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::panic::Location;
 use std::rc::{Rc, Weak};
@@ -105,14 +105,14 @@ trait SourceSubscription {
 
 struct OwnerRecord {
     dependencies: HashMap<SignalId, Weak<dyn SourceSubscription>>,
-    cleanup: Vec<Box<dyn FnOnce()>>,
+    cleanup: BTreeMap<u64, Box<dyn FnOnce()>>,
 }
 
 impl OwnerRecord {
     fn new() -> Self {
         Self {
             dependencies: HashMap::new(),
-            cleanup: Vec::new(),
+            cleanup: BTreeMap::new(),
         }
     }
 }
@@ -123,6 +123,7 @@ struct RegistryInner {
     // Value is the source location of the most recent `request_animation_frame` for that owner,
     // so a runaway-animation diagnostic can point at the exact call site in user code.
     animating: RefCell<HashMap<OwnerId, &'static Location<'static>>>,
+    next_cleanup: Cell<u64>,
 }
 
 /// Current bounded bookkeeping counts for a reactive owner registry.
@@ -136,6 +137,44 @@ pub struct ReactiveStats {
     pub dirty_owner_count: usize,
     /// Number of owners with a pending animation-frame request.
     pub animating_owner_count: usize,
+    /// Number of retained owner teardown callbacks.
+    pub cleanup_count: usize,
+}
+
+/// A removable owner teardown registration.
+///
+/// Dropping this handle unregisters the callback without running it. If the owner is removed
+/// first, the callback runs exactly once and subsequently dropping the handle is a no-op.
+pub struct OwnerCleanup {
+    registry: Weak<RegistryInner>,
+    owner: OwnerId,
+    id: Cell<Option<u64>>,
+}
+
+impl fmt::Debug for OwnerCleanup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OwnerCleanup(..)")
+    }
+}
+
+impl OwnerCleanup {
+    fn cancel(&self) {
+        let Some(id) = self.id.replace(None) else {
+            return;
+        };
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        if let Some(owner) = registry.owners.borrow_mut().get_mut(&self.owner) {
+            owner.cleanup.remove(&id);
+        }
+    }
+}
+
+impl Drop for OwnerCleanup {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 /// Owns component identities, dependency edges, and the dirty queue.
@@ -171,6 +210,7 @@ impl OwnerRegistry {
                 owners: RefCell::new(HashMap::new()),
                 dirty: RefCell::new(DirtyQueue::default()),
                 animating: RefCell::new(HashMap::new()),
+                next_cleanup: Cell::new(1),
             }),
         }
     }
@@ -315,12 +355,34 @@ impl OwnerRegistry {
     ///
     /// Callbacks run exactly once during [`remove_owner`](Self::remove_owner).
     pub fn register_cleanup(&self, owner: OwnerId, cleanup: impl FnOnce() + 'static) -> bool {
+        self.insert_cleanup(owner, cleanup).is_some()
+    }
+
+    /// Registers removable synchronous teardown work for a live owner.
+    ///
+    /// The returned handle unregisters the callback when dropped. Returns `None` when the owner is
+    /// already absent or the registry cannot allocate another cleanup identity.
+    pub fn register_cleanup_handle(
+        &self,
+        owner: OwnerId,
+        cleanup: impl FnOnce() + 'static,
+    ) -> Option<OwnerCleanup> {
+        let id = self.insert_cleanup(owner, cleanup)?;
+        Some(OwnerCleanup {
+            registry: Rc::downgrade(&self.inner),
+            owner,
+            id: Cell::new(Some(id)),
+        })
+    }
+
+    fn insert_cleanup(&self, owner: OwnerId, cleanup: impl FnOnce() + 'static) -> Option<u64> {
+        let id = self.inner.next_cleanup.get();
+        let next = id.checked_add(1)?;
         let mut owners = self.inner.owners.borrow_mut();
-        let Some(record) = owners.get_mut(&owner) else {
-            return false;
-        };
-        record.cleanup.push(Box::new(cleanup));
-        true
+        let record = owners.get_mut(&owner)?;
+        self.inner.next_cleanup.set(next);
+        record.cleanup.insert(id, Box::new(cleanup));
+        Some(id)
     }
 
     /// Unmounts an owner, dropping dependency edges before running cleanup.
@@ -338,13 +400,13 @@ impl OwnerRegistry {
                 source.remove_owner(owner);
             }
         }
-        for cleanup in record.cleanup {
+        for cleanup in record.cleanup.into_values() {
             cleanup();
         }
         true
     }
 
-    /// Returns bounded owner, dependency, and dirty queue counts.
+    /// Returns current owner, dependency, cleanup, animation, and dirty queue counts.
     #[must_use]
     pub fn stats(&self) -> ReactiveStats {
         let owners = self.inner.owners.borrow();
@@ -353,6 +415,7 @@ impl OwnerRegistry {
             subscription_count: owners.values().map(|owner| owner.dependencies.len()).sum(),
             dirty_owner_count: self.inner.dirty.borrow().len(),
             animating_owner_count: self.inner.animating.borrow().len(),
+            cleanup_count: owners.values().map(|owner| owner.cleanup.len()).sum(),
         }
     }
 

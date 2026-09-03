@@ -98,10 +98,17 @@ impl App {
     /// # Errors
     ///
     /// Always returns [`AppError::UnsupportedPlatform`].
+    /// This path does not bind [`Eventful`]; use [`run_eventful`](Self::run_eventful) for an
+    /// eventful root component.
     pub fn run<C: Render>(self, _root: C) -> Result<(), AppError> {
         Err(AppError::UnsupportedPlatform)
     }
 
+    /// Reports that the Win32 host is unavailable on this target.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`AppError::UnsupportedPlatform`].
     pub fn run_eventful<C: Render + Eventful>(self, _root: C) -> Result<(), AppError> {
         Err(AppError::UnsupportedPlatform)
     }

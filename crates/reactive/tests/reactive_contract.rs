@@ -91,6 +91,27 @@ fn removing_an_owner_detaches_subscriptions_and_runs_cleanup_once() {
 }
 
 #[test]
+fn dropping_a_cleanup_handle_unregisters_it_without_running_it() {
+    let owners = OwnerRegistry::new();
+    let owner = owners.create_owner();
+    let cleanup_count = Rc::new(Cell::new(0));
+    let cleanup_count_for_callback = cleanup_count.clone();
+
+    let cleanup = owners
+        .register_cleanup_handle(owner, move || {
+            cleanup_count_for_callback.set(cleanup_count_for_callback.get() + 1);
+        })
+        .expect("live owner accepts cleanup");
+    assert_eq!(owners.stats().cleanup_count, 1);
+
+    drop(cleanup);
+    assert_eq!(owners.stats().cleanup_count, 0);
+    assert_eq!(cleanup_count.get(), 0);
+    assert!(owners.remove_owner(owner));
+    assert_eq!(cleanup_count.get(), 0);
+}
+
+#[test]
 fn repeated_renders_and_mount_cycles_have_bounded_tracking_state() {
     let owners = OwnerRegistry::new();
     let signal = Signal::new(0_u32);

@@ -18,7 +18,7 @@ pub use element::{
 };
 pub use events::{
     AppEvents, EventBindings, EventContext, EventError, EventPriority, EventScope,
-    EventSubscriptionInfo, MAX_PENDING_EVENTS, Subscription,
+    EventSubscriptionInfo, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, Subscription,
 };
 pub use scheduler::{FrameBatcher, FrameLoopError, WindowId};
 pub use shared_string::SharedString;
