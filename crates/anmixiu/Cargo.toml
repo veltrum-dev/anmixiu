@@ -46,5 +46,9 @@ path = "../../examples/event.rs"
 name = "multi_window"
 path = "../../examples/multi_window.rs"
 
+[[example]]
+name = "backdrop_blur"
+path = "../../examples/backdrop_blur.rs"
+
 [lints]
 workspace = true

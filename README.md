@@ -86,6 +86,12 @@ Portable renderers clamp sigma to 64 logical pixels. Scenes without backdrop eff
 direct-to-surface fast path and allocate no compositor textures. Blur scenes use bounded reusable
 intermediate textures; smaller effect bounds and static backdrops remain the most efficient usage.
 
+Run the interactive comparison example and toggle the effect on and off:
+
+```sh
+cargo run --example backdrop_blur
+```
+
 `div()`, `text()`, and `button()` return concrete `DivElement`, `TextElement`, and
 `ButtonElement` values. Custom element recipes implement `Element`; persistent stateful components
 implement `Render`. Style, children, identity, and stateful interaction are separate traits exposed
