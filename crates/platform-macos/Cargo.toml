@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [features]
 default = []
-devtools = ["anmixiu-core/devtools"]
+devtools = ["anmixiu-core/devtools", "anmixiu-platform-native/devtools"]
 
 [dependencies]
 anmixiu-core.workspace = true
