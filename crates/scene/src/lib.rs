@@ -320,6 +320,14 @@ pub enum DrawCommand {
         corner_radius: f32,
         clip: Option<Clip>,
     },
+    /// A rounded stroke painted inside `bounds`.
+    RoundedBorder {
+        bounds: Rect,
+        color: Color,
+        corner_radius: f32,
+        border_width: f32,
+        clip: Option<Clip>,
+    },
     Glyphs {
         glyphs: Arc<[Glyph]>,
         color: Color,

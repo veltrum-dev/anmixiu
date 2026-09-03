@@ -64,6 +64,29 @@ fn offscreen_rounding_and_clip_reject_pixels_outside_the_shape() {
 }
 
 #[test]
+fn offscreen_rounded_border_preserves_rounded_outer_and_inner_edges() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = scene_with(DrawCommand::RoundedBorder {
+        bounds: rect(0.0, 0.0, 16.0, 16.0),
+        color: Color::WHITE,
+        corner_radius: 8.0,
+        border_width: 2.0,
+        clip: None,
+    });
+
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(16, 16).unwrap())
+        .unwrap();
+
+    assert_eq!(image.pixel_rgba(0, 0), [0, 0, 0, 0], "rounded outer edge");
+    assert_eq!(image.pixel_rgba(8, 0), [255, 255, 255, 255], "border");
+    assert_eq!(image.pixel_rgba(8, 8), [0, 0, 0, 0], "hollow center");
+}
+
+#[test]
 fn unavailable_drawable_does_not_submit_or_request_a_busy_retry() {
     let Some(mut renderer) = MetalRenderer::new().unwrap() else {
         eprintln!("Metal device unavailable on this macOS host");

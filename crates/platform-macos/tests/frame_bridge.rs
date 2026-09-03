@@ -396,11 +396,26 @@ fn button_label_is_centered_and_focus_ring_is_paint_only() {
         .build(&element, Size::new(240.0, 120.0), 1.0)
         .unwrap();
     assert_eq!(focused.layout, first.layout);
-    assert_eq!(focused.scene.commands().len(), before + 4);
+    assert_eq!(focused.scene.commands().len(), before + 1);
+    let Some(DrawCommand::RoundedBorder {
+        bounds,
+        corner_radius,
+        border_width,
+        clip,
+        ..
+    }) = focused.scene.commands().last()
+    else {
+        panic!("focus creates one rounded border command");
+    };
+    assert_eq!(bounds.origin, Point::new(-2.0, -2.0));
+    assert_eq!(bounds.size, Size::new(204.0, 104.0));
+    assert!((*corner_radius - 10.0).abs() < f32::EPSILON);
+    assert!((*border_width - 2.0).abs() < f32::EPSILON);
+    assert!(clip.is_none());
 }
 
 #[test]
-fn focus_at_uses_the_topmost_click_target_and_invalidates_paint() {
+fn pointer_focus_is_retained_without_showing_the_keyboard_focus_ring() {
     let element = button("Focusable")
         .width(px(120.0))
         .height(px(44.0))
@@ -417,6 +432,21 @@ fn focus_at_uses_the_topmost_click_target_and_invalidates_paint() {
         builder.focused(),
         Some(&GlobalElementId::new(["focus-target".into()]))
     );
+    let pointer_focused = builder
+        .build(&element, Size::new(160.0, 80.0), 1.0)
+        .unwrap();
+    assert_eq!(pointer_focused.scene.commands(), frame.scene.commands());
+
+    assert!(builder.set_focused(Some(GlobalElementId::new(["focus-target".into()]))));
+    let keyboard_focused = builder
+        .build(&element, Size::new(160.0, 80.0), 1.0)
+        .unwrap();
+    assert_ne!(
+        keyboard_focused.scene.commands(),
+        pointer_focused.scene.commands()
+    );
+
+    assert!(builder.focus_at(&frame, Point::new(10.0, 10.0)));
     assert!(!builder.focus_at(&frame, Point::new(10.0, 10.0)));
     assert!(builder.focus_at(&frame, Point::new(150.0, 70.0)));
     assert!(builder.focused().is_none());

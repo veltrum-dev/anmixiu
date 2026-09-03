@@ -55,6 +55,13 @@ fn scene_preserves_platform_neutral_quad_glyph_and_upload_data() {
             corner_radius: 4.0,
             clip: Some(clip),
         },
+        DrawCommand::RoundedBorder {
+            bounds: rect(4.0, 4.0, 22.0, 22.0),
+            color: Color::WHITE,
+            corner_radius: 5.0,
+            border_width: 1.0,
+            clip: Some(clip),
+        },
         DrawCommand::Glyphs {
             glyphs: Arc::from([Glyph::new(
                 rect(12.0, 13.0, 8.0, 10.0),

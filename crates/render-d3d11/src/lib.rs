@@ -442,6 +442,45 @@ mod platform {
                     };
                     Ok(1)
                 }),
+                DrawCommand::RoundedBorder {
+                    bounds,
+                    color,
+                    corner_radius,
+                    border_width,
+                    clip,
+                } => self.draw_with_clip(*clip, |renderer| {
+                    let border_width = border_width
+                        .max(0.0)
+                        .min(bounds.size.width.max(0.0) / 2.0)
+                        .min(bounds.size.height.max(0.0) / 2.0);
+                    if border_width <= 0.0 {
+                        return Ok(0);
+                    }
+                    renderer.set_brush(*color);
+                    let half_width = border_width / 2.0;
+                    let mut rect = d2d_rect(*bounds);
+                    rect.left += half_width;
+                    rect.top += half_width;
+                    rect.right -= half_width;
+                    rect.bottom -= half_width;
+                    let radius = (corner_radius.max(0.0) - half_width).max(0.0);
+                    let rounded = D2D1_ROUNDED_RECT {
+                        rect,
+                        radiusX: radius,
+                        radiusY: radius,
+                    };
+                    // SAFETY: Rounded rectangle and brush remain valid through the draw call;
+                    // the absent stroke style requests Direct2D's solid default stroke.
+                    unsafe {
+                        renderer.context.DrawRoundedRectangle(
+                            &raw const rounded,
+                            &renderer.brush,
+                            border_width,
+                            None,
+                        );
+                    };
+                    Ok(1)
+                }),
                 DrawCommand::Glyphs {
                     glyphs,
                     color,
@@ -763,6 +802,11 @@ pub struct D3d11Renderer;
 
 #[cfg(not(target_os = "windows"))]
 impl D3d11Renderer {
+    /// Reports that the D3D11 renderer is unavailable on this target.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`RenderError::UnsupportedPlatform`].
     pub fn new() -> Result<Self, RenderError> {
         Err(RenderError::UnsupportedPlatform)
     }

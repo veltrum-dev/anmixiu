@@ -246,6 +246,7 @@ pub struct FrameBuilder {
     hovered: Option<HoverTarget>,
     hover_handler: Option<HoverHandler>,
     focused: Option<GlobalElementId>,
+    focus_visible: bool,
     #[cfg(feature = "devtools")]
     inspected: Option<String>,
     #[cfg(feature = "devtools")]
@@ -290,6 +291,7 @@ impl FrameBuilder {
             hovered: None,
             hover_handler: None,
             focused: None,
+            focus_visible: false,
             #[cfg(feature = "devtools")]
             inspected: None,
             #[cfg(feature = "devtools")]
@@ -378,7 +380,9 @@ impl FrameBuilder {
                 &shaped,
                 latest_upload,
                 hovered.as_ref(),
-                self.focused.as_ref(),
+                self.focus_visible
+                    .then_some(self.focused.as_ref())
+                    .flatten(),
                 debug_selection,
             )
         });
@@ -486,23 +490,30 @@ impl FrameBuilder {
         true
     }
 
-    /// Changes the semantic element receiving the keyboard/pointer focus ring.
+    /// Changes the semantic element receiving visible keyboard focus.
     pub fn set_focused(&mut self, focused: Option<GlobalElementId>) -> bool {
-        if self.focused == focused {
+        let focus_visible = focused.is_some();
+        self.set_focus(focused, focus_visible)
+    }
+
+    fn set_focus(&mut self, focused: Option<GlobalElementId>, focus_visible: bool) -> bool {
+        if self.focused == focused && self.focus_visible == focus_visible {
             return false;
         }
         self.focused = focused;
+        self.focus_visible = focus_visible;
         self.paint_generation = self.paint_generation.saturating_add(1);
         true
     }
 
-    /// Focuses the frontmost click target at `point`, or clears focus over empty space.
+    /// Focuses the frontmost click target at `point` without showing the keyboard-only focus ring,
+    /// or clears focus over empty space.
     pub fn focus_at(&mut self, frame: &BuiltFrame, point: Point) -> bool {
         let focused = frame
             .click_target_at(point)
             .and_then(|hit| frame.global_id(hit))
             .cloned();
-        self.set_focused(focused)
+        self.set_focus(focused, false)
     }
 
     #[must_use]
@@ -1260,29 +1271,11 @@ fn push_focus_outline(commands: &mut Vec<DrawCommand>, bounds: Rect, style: &Sty
             bounds.size.height + width * 2.0,
         ),
     );
-    let horizontal = Size::new(outer.size.width, width);
-    let vertical = Size::new(width, bounds.size.height);
-    commands.push(DrawCommand::SolidQuad {
-        bounds: Rect::new(outer.origin, horizontal),
+    commands.push(DrawCommand::RoundedBorder {
+        bounds: outer,
         color,
-        clip: None,
-    });
-    commands.push(DrawCommand::SolidQuad {
-        bounds: Rect::new(
-            Point::new(outer.origin.x, outer.max_y() - width),
-            horizontal,
-        ),
-        color,
-        clip: None,
-    });
-    commands.push(DrawCommand::SolidQuad {
-        bounds: Rect::new(Point::new(outer.origin.x, bounds.origin.y), vertical),
-        color,
-        clip: None,
-    });
-    commands.push(DrawCommand::SolidQuad {
-        bounds: Rect::new(Point::new(outer.max_x() - width, bounds.origin.y), vertical),
-        color,
+        corner_radius: style.border_radius.value().max(0.0) + width,
+        border_width: width,
         clip: None,
     });
 }

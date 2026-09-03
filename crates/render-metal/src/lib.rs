@@ -249,6 +249,25 @@ fragment float4 gui_fragment(
     }
     return color;
 }
+
+fragment float4 border_fragment(
+    VertexOut in [[stage_in]],
+    constant DrawUniforms &draw [[buffer(1)]]) {
+    float distance = rounded_distance(in.local, draw.bounds.zw, draw.misc.x);
+    if ((draw.misc.x > 0.0 && distance > 0.0) || distance < -draw.uv_rect.x) {
+        discard_fragment();
+    }
+    if (draw.misc.w > 0.5) {
+        float2 clip_local = in.world - draw.clip_rect.xy;
+        if (any(clip_local < float2(0.0)) || any(clip_local >= draw.clip_rect.zw)) {
+            discard_fragment();
+        }
+        if (draw.misc.y > 0.0 && rounded_distance(clip_local, draw.clip_rect.zw, draw.misc.y) > 0.0) {
+            discard_fragment();
+        }
+    }
+    return draw.color;
+}
 ";
 
     #[rustfmt::skip]
@@ -278,6 +297,8 @@ fragment float4 gui_fragment(
         queue: CommandQueue,
         rgba_pipeline: RenderPipelineState,
         bgra_pipeline: RenderPipelineState,
+        rgba_border_pipeline: RenderPipelineState,
+        bgra_border_pipeline: RenderPipelineState,
         unit_quad: Buffer,
         atlas_capacity: usize,
         atlas_textures: HashMap<AtlasId, CachedAtlas>,
@@ -318,8 +339,23 @@ fragment float4 gui_fragment(
             let fragment = library
                 .get_function("gui_fragment", None)
                 .map_err(RenderError::ShaderCompilation)?;
+            let border_fragment = library
+                .get_function("border_fragment", None)
+                .map_err(RenderError::ShaderCompilation)?;
             let rgba_pipeline = pipeline(&device, &vertex, &fragment, MTLPixelFormat::RGBA8Unorm)?;
             let bgra_pipeline = pipeline(&device, &vertex, &fragment, MTLPixelFormat::BGRA8Unorm)?;
+            let rgba_border_pipeline = pipeline(
+                &device,
+                &vertex,
+                &border_fragment,
+                MTLPixelFormat::RGBA8Unorm,
+            )?;
+            let bgra_border_pipeline = pipeline(
+                &device,
+                &vertex,
+                &border_fragment,
+                MTLPixelFormat::BGRA8Unorm,
+            )?;
             let queue = device.new_command_queue();
             let unit_quad = device.new_buffer_with_data(
                 UNIT_QUAD.as_ptr().cast(),
@@ -331,6 +367,8 @@ fragment float4 gui_fragment(
                 queue,
                 rgba_pipeline,
                 bgra_pipeline,
+                rgba_border_pipeline,
+                bgra_border_pipeline,
                 unit_quad,
                 atlas_capacity: config.atlas_texture_capacity,
                 atlas_textures: HashMap::with_capacity(config.atlas_texture_capacity),
@@ -639,12 +677,11 @@ fragment float4 gui_fragment(
             attachment.set_store_action(MTLStoreAction::Store);
             let command_buffer = self.queue.new_command_buffer().to_owned();
             let encoder = command_buffer.new_render_command_encoder(pass);
-            let pipeline = if format == MTLPixelFormat::RGBA8Unorm {
-                &self.rgba_pipeline
+            if format == MTLPixelFormat::RGBA8Unorm {
+                encoder.set_render_pipeline_state(&self.rgba_pipeline);
             } else {
-                &self.bgra_pipeline
-            };
-            encoder.set_render_pipeline_state(pipeline);
+                encoder.set_render_pipeline_state(&self.bgra_pipeline);
+            }
             encoder.set_vertex_buffer(0, Some(&self.unit_quad), 0);
             let viewport = [size.width as f32, size.height as f32];
             encoder.set_vertex_bytes(2, size_of_val(&viewport) as u64, viewport.as_ptr().cast());
@@ -653,19 +690,58 @@ fragment float4 gui_fragment(
             } else {
                 1.0
             };
+            let mut border_pipeline_selected = false;
             for command in scene.commands() {
+                let needs_border_pipeline = matches!(command, DrawCommand::RoundedBorder { .. });
+                if needs_border_pipeline != border_pipeline_selected {
+                    if format == MTLPixelFormat::RGBA8Unorm && needs_border_pipeline {
+                        encoder.set_render_pipeline_state(&self.rgba_border_pipeline);
+                    } else if format == MTLPixelFormat::RGBA8Unorm {
+                        encoder.set_render_pipeline_state(&self.rgba_pipeline);
+                    } else if needs_border_pipeline {
+                        encoder.set_render_pipeline_state(&self.bgra_border_pipeline);
+                    } else {
+                        encoder.set_render_pipeline_state(&self.bgra_pipeline);
+                    }
+                    border_pipeline_selected = needs_border_pipeline;
+                }
                 match command {
                     DrawCommand::SolidQuad {
                         bounds,
                         color,
                         clip,
-                    } => self.draw(encoder, *bounds, *color, 0.0, *clip, None, scale)?,
+                    } => self.draw(encoder, *bounds, *color, 0.0, 0.0, *clip, None, scale)?,
                     DrawCommand::RoundedQuad {
                         bounds,
                         color,
                         corner_radius,
                         clip,
-                    } => self.draw(encoder, *bounds, *color, *corner_radius, *clip, None, scale)?,
+                    } => self.draw(
+                        encoder,
+                        *bounds,
+                        *color,
+                        *corner_radius,
+                        0.0,
+                        *clip,
+                        None,
+                        scale,
+                    )?,
+                    DrawCommand::RoundedBorder {
+                        bounds,
+                        color,
+                        corner_radius,
+                        border_width,
+                        clip,
+                    } => self.draw(
+                        encoder,
+                        *bounds,
+                        *color,
+                        *corner_radius,
+                        *border_width,
+                        *clip,
+                        None,
+                        scale,
+                    )?,
                     DrawCommand::Glyphs {
                         glyphs,
                         color,
@@ -676,6 +752,7 @@ fragment float4 gui_fragment(
                                 encoder,
                                 glyph.bounds,
                                 *color,
+                                0.0,
                                 0.0,
                                 *clip,
                                 Some(glyph),
@@ -696,6 +773,7 @@ fragment float4 gui_fragment(
             bounds: Rect,
             color: Color,
             corner_radius: f32,
+            border_width: f32,
             clip: Option<Clip>,
             glyph: Option<&Glyph>,
             scale: f32,
@@ -710,7 +788,11 @@ fragment float4 gui_fragment(
                     1.0,
                 )
             });
-            let uv_rect = glyph.map_or([0.0, 0.0, 1.0, 1.0], |glyph| {
+            let border_width = border_width
+                .max(0.0)
+                .min(bounds.size.width.max(0.0) / 2.0)
+                .min(bounds.size.height.max(0.0) / 2.0);
+            let uv_rect = glyph.map_or([border_width * scale, 0.0, 1.0, 1.0], |glyph| {
                 rect_array(glyph.uv_bounds, 1.0)
             });
             let uniforms = DrawUniforms {
