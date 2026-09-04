@@ -294,7 +294,7 @@ impl<C: 'static> Context<C> {
         self.app_handle.clone()
     }
 
-    /// Returns the stable native window that owns this component.
+    /// Returns the stable native window that owns this mounted Element.
     #[must_use]
     pub fn window(&self) -> WindowHandle {
         self.window_handle.clone()
@@ -317,21 +317,21 @@ impl<C: 'static> Context<C> {
         spawn(Box::pin(future))
     }
 
-    /// Requests that this component be re-rendered on the next display frame, as one step of an
+    /// Requests that this Element be re-rendered on the next display frame, as one step of an
     /// ongoing animation.
     ///
     /// Call this from `render` each frame to keep an animation running (reading a clock or
     /// interpolating some value as you go), and simply stop calling it to end the animation — the
     /// same per-frame model as the browser's `requestAnimationFrame`. Frames driven this way are
     /// paced by the display link and are exempt from the render-loop guard, so continuous
-    /// animation is allowed; a component that instead keeps invalidating itself *without*
+    /// animation is allowed; an Element that instead keeps invalidating itself *without*
     /// requesting an animation frame is still treated as a runaway loop.
     ///
-    /// Each animated frame currently re-runs the whole component; prefer coarse, low-frequency
+    /// Each animated frame currently re-runs the whole Element lifecycle; prefer coarse, low-frequency
     /// animation until compositor-level property animation lands.
     #[track_caller]
     pub fn request_animation_frame(&self) {
-        // Forward the caller's location (this line's caller, i.e. the component's render code) so a
+        // Forward the caller's location (this line's caller, i.e. the Element's render code) so a
         // runaway-animation warning can name the exact call site rather than this wrapper.
         let _ = self
             .registry

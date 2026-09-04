@@ -1,28 +1,18 @@
-use crate::{EventBindings, IntoElement, component::Context};
+use crate::{EventBindings, IntoElement, component::Context, element::EmptyElement};
 
-/// Optional event capability for a persistent Element.
+/// Lifecycle contract shared by every public Element.
 ///
-/// A host explicitly created as eventful invokes [`bind_events`](Self::bind_events) once when the
-/// Element is mounted. At the application boundary this means using `App::run_eventful`; nested
-/// components opt in with [`crate::eventful_component`]. Ordinary hosts deliberately do not inspect
-/// optional traits. The registration set owns the returned subscriptions and drops them with the
-/// Element owner, so ordinary Elements pay no event lifecycle cost unless their host opts in.
-pub trait Eventful: Sized + 'static {
+/// `on_mount` runs once after the Element's first successful paint, `render` runs inside this
+/// Element's reactive observer, and `on_unmount` runs once when its mounted identity leaves the
+/// tree. Ordinary elements inherit no-op mount/unmount hooks.
+pub trait Lifecycle: Sized + 'static {
     fn bind_events(&self, _cx: &mut Context<Self>, _bindings: &mut EventBindings) {}
-}
 
-/// Persistent component contract.
-///
-/// Components own signals and lifecycle; custom element values implement [`crate::Element`].
-pub trait Render: Sized + 'static {
     fn on_mount(&self, _cx: &mut Context<Self>) {}
 
-    fn render(&self, cx: &mut Context<Self>) -> impl IntoElement;
+    fn render(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        EmptyElement::new()
+    }
 
     fn on_unmount(&self, _cx: &mut Context<Self>) {}
-}
-
-/// Consuming component recipe with no persistent lifecycle.
-pub trait RenderOnce: Sized + 'static {
-    fn render(self, cx: &mut Context<Self>) -> impl IntoElement;
 }

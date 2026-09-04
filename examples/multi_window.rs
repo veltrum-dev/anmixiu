@@ -2,10 +2,20 @@ use anmixiu::prelude::*;
 
 #[derive(Default)]
 struct MainWindow {
+    style: Style,
     next_detail: Signal<u64>,
 }
 
-impl Render for MainWindow {
+impl Styled for MainWindow {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for MainWindow {
     fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let app = cx.app();
         let current = cx.window();
@@ -34,7 +44,10 @@ impl Render for MainWindow {
                             Window::new()
                                 .title(shared_format!("Detail {detail}"))
                                 .size(420.0, 260.0),
-                            DetailWindow { detail },
+                            DetailWindow {
+                                style: Style::default(),
+                                detail,
+                            },
                         ) {
                             eprintln!("failed to open detail window: {error}");
                         }
@@ -65,11 +78,23 @@ impl Render for MainWindow {
     }
 }
 
+impl Element for MainWindow {}
+
 struct DetailWindow {
+    style: Style,
     detail: u64,
 }
 
-impl Render for DetailWindow {
+impl Styled for DetailWindow {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for DetailWindow {
     fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let window = cx.window();
         let close_window = window.clone();
@@ -96,6 +121,8 @@ impl Render for DetailWindow {
             )
     }
 }
+
+impl Element for DetailWindow {}
 
 fn main() -> Result<(), anmixiu::AppError> {
     tracing_subscriber::fmt()

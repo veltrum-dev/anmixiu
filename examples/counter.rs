@@ -9,46 +9,13 @@ struct AppState {
     username: SharedString,
 }
 
+#[derive(Default)]
 struct Counter {
+    style: Style,
     count: Signal<u32>,
-    count_display: std::rc::Rc<CountDisplay>,
     ready: Signal<bool>,
     animating: Signal<bool>,
     animation_start: Signal<Option<Instant>>,
-}
-
-struct CountDisplay {
-    count: Signal<u32>,
-}
-
-impl Render for CountDisplay {
-    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu::IntoElement {
-        div()
-            .h(px(130.0))
-            .items_center()
-            .justify_center()
-            .bg(Color::rgb(0.075, 0.1, 0.17))
-            .rounded(px(18.0))
-            .child(
-                text(shared_format!("Count  {}", self.count.get()))
-                    .text_color(Color::rgb(0.95, 0.97, 1.0)),
-            )
-    }
-}
-
-impl Default for Counter {
-    fn default() -> Self {
-        let count = Signal::new(0);
-        Self {
-            count_display: std::rc::Rc::new(CountDisplay {
-                count: count.clone(),
-            }),
-            count,
-            ready: Signal::new(false),
-            animating: Signal::new(false),
-            animation_start: Signal::new(None),
-        }
-    }
 }
 
 /// Duration of the progress-bar sweep.
@@ -76,7 +43,16 @@ impl Counter {
     }
 }
 
-impl Render for Counter {
+impl Styled for Counter {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for Counter {
     fn on_mount(&self, cx: &mut Context<Self>) {
         let ready = self.ready.clone();
         if let Err(error) = cx.spawn(async move {
@@ -89,6 +65,7 @@ impl Render for Counter {
 
     fn render(&self, cx: &mut Context<Self>) -> impl anmixiu::IntoElement {
         let State(app) = cx.state::<AppState>();
+        let count = self.count.get();
         let ready = self.ready.get();
 
         let sync_count = self.count.clone();
@@ -116,7 +93,18 @@ impl Render for Counter {
                 |this| this.child(text("Ready · 原生中英文字体已加载")),
                 |this| this.child(text("Loading…")),
             )
-            .child(component(self.count_display.clone()).id("count-display"))
+            .child(
+                div()
+                    .h(px(130.0))
+                    .items_center()
+                    .justify_center()
+                    .bg(Color::rgb(0.075, 0.1, 0.17))
+                    .rounded(px(18.0))
+                    .child(
+                        text(shared_format!("Count  {count}"))
+                            .text_color(Color::rgb(0.95, 0.97, 1.0)),
+                    ),
+            )
             .child(
                 div()
                     .flex_row()
@@ -174,6 +162,8 @@ impl Render for Counter {
             .child(progress_bar(progress))
     }
 }
+
+impl Element for Counter {}
 
 /// A track with a fill whose width follows `progress` (`0.0..=1.0`).
 fn progress_bar(progress: f32) -> DivElement {

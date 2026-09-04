@@ -184,19 +184,6 @@ fn append_nodes(
     next_index: &mut u64,
     output: &mut String,
 ) {
-    if element.kind_name() == "component" {
-        let own_id = element.element_id().cloned();
-        if let Some(id) = own_id.as_ref() {
-            path.push(id.clone());
-        }
-        for child in element.children_ref() {
-            append_nodes(child, frame, path, parent, depth, next_index, output);
-        }
-        if own_id.is_some() {
-            path.pop();
-        }
-        return;
-    }
     let index = *next_index;
     *next_index = next_index.saturating_add(1);
     let own_id = element.element_id().cloned();

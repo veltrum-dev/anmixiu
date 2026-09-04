@@ -1,4 +1,4 @@
-use crate::SharedString;
+use crate::{Lifecycle, SharedString};
 
 use super::{
     id::ElementId,
@@ -64,6 +64,8 @@ impl Element for ButtonElement {
         ElementNode::new(ElementKind::Button(self.label), self.base, Vec::new())
     }
 }
+
+impl Lifecycle for ButtonElement {}
 
 #[must_use]
 pub fn button(label: impl Into<SharedString>) -> ButtonElement {

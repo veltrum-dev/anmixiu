@@ -5,6 +5,7 @@ use super::{
     style::{Style, StyleRefinement, Styled},
     traits::{Element, ParentElement},
 };
+use crate::Lifecycle;
 
 /// Flex container element returned by [`div`].
 #[derive(Clone, Debug, Default)]
@@ -93,6 +94,8 @@ impl Element for DivElement {
         ElementNode::new(ElementKind::Div, self.base, self.children)
     }
 }
+
+impl Lifecycle for DivElement {}
 
 #[must_use]
 pub fn div() -> DivElement {

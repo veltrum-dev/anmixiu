@@ -7,8 +7,8 @@ with `.rules`.
 ## Product and public API
 
 - Anmixiu is a native, pure-Rust GUI workspace. The public surface uses ordinary Rust values and chainable builders (`div().height(px(40.)).child(text("Hello"))`); do not add JSX, RSX, tag macros, WebView, GPUI, or winit.
-- `anmixiu::Context` is the component context name. `Render::render` receives `&self`; state mutation goes through `Signal`. Lifecycle callbacks are synchronous. `RenderOnce` consumes `self` and has no lifecycle.
-- Custom element values implement the public `Element` trait; persistent components implement `Render`. Built-ins return concrete `DivElement`, `TextElement`, and `ButtonElement` types. Heterogeneous storage uses the doc-hidden `ElementNode` projection only across internal crate boundaries.
+- `anmixiu::Context` is the element context name. Public `Lifecycle::render` receives `&self`; state mutation goes through `Signal`, and lifecycle callbacks are synchronous. `on_mount` runs once after the first successful paint and `on_unmount` once in reverse tree order.
+- Every public UI value implements `Element: Styled + Lifecycle`. Built-ins return concrete `DivElement`, `TextElement`, and `ButtonElement` primitive fast paths; custom Elements retain independent mounted identities and reactive owners when used as children. Heterogeneous storage uses the doc-hidden `ElementNode` projection only across internal crate boundaries.
 - Public `ElementId` is a caller-provided semantic identity. `.id(...)` upgrades a concrete element to `Stateful<E>` and unlocks stateful interaction APIs such as `.on_click(...)`; dense layout/paint node indices remain internal implementation details.
 - Element capabilities follow interface segregation: `Styled` owns style builders, `ParentElement` owns child builders, `InteractiveElement` owns identity, and `StatefulInteractiveElement` owns stateful handlers. Do not add these methods as inherent methods on a universal element type.
 - Built-in concrete elements must be useful without appearance boilerplate. Containers and text keep neutral layout/inheritance defaults; controls such as `ButtonElement` provide intrinsic sizing, padding, centered content, pointer cursor, focus ring, and a visible accessible-size baseline with border and hover feedback that `Styled`/`InteractiveElement` can override. Do not turn these baselines into a full theme/component library.
@@ -45,6 +45,7 @@ with `.rules`.
 ## Runtime and performance
 
 - Signal reads subscribe only inside an explicit render observer. Writes mutate and mark owners dirty; rendering is frame-batched and deduplicated. Unmount removes subscriptions and cancels owner tasks.
+- Signal subscriptions route directly to stable mounted owners; a write never scans the Element tree. Same-parent unkeyed identity uses sibling position plus Rust type, while explicit `ElementId` replaces position. Reconfiguration of the same identity must not repeat mount.
 - Each app owns one minimal-feature Tokio multithread runtime. UI futures are local, resume only on the native UI thread, and are owner-bound. Do not make lifecycle or render async.
 - Render, layout, paint, and input hot paths contain no blocking I/O, parsing, ordinary business-field mutation, or unbounded task/observer/history creation.
 - Every cache documents its key, invalidation rule, and hard capacity. Warm steady-state memory must not grow continuously. Algorithmic performance changes need before/after benchmark evidence.

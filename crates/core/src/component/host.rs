@@ -1,5 +1,5 @@
 use std::{
-    any::TypeId,
+    any::{Any, TypeId},
     collections::{HashMap, HashSet},
     fmt,
     rc::Rc,
@@ -8,35 +8,56 @@ use std::{
 use anmixiu_reactive::{OwnerId, ReactiveStats};
 use thiserror::Error;
 
-use crate::{
-    Element, ElementNode, EventBindings, Eventful, GlobalElementId, IntoElement,
-    component::ContextServices,
-};
+use crate::{Element, ElementNode, EventBindings, IntoElement, component::ContextServices};
 
-use super::{Context, Render, RenderOnce};
+use super::{Context, Lifecycle};
 
 #[derive(Debug, Error)]
 pub enum RenderError {
-    #[error("component has already been unmounted")]
+    #[error("element lifecycle has already been unmounted")]
     Unmounted,
-    #[error("component render did not produce an element")]
+    #[error("element lifecycle render did not produce an element")]
     MissingElement,
-    #[error("nested Render component is missing its required semantic ElementId")]
-    MissingComponentId,
-    #[error("duplicate nested component identity `{0}` in one component render")]
-    DuplicateComponentId(GlobalElementId),
+    #[error("duplicate mounted Element identity `{0}` in one lifecycle render")]
+    DuplicateElementIdentity(String),
 }
 
-pub(crate) trait NestedComponentFactory: fmt::Debug {
-    fn component_type_id(&self) -> TypeId;
-    fn instance_id(&self) -> *const ();
-    fn mount(&self, services: &ContextServices) -> Box<dyn NestedComponentHost>;
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum MountedPathPart {
+    Semantic(crate::ElementId),
+    Position(usize),
 }
 
-pub(crate) trait NestedComponentHost {
-    fn component_type_id(&self) -> TypeId;
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MountedPath(Vec<MountedPathPart>);
+
+impl fmt::Display for MountedPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, part) in self.0.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str("/")?;
+            }
+            match part {
+                MountedPathPart::Semantic(id) => id.fmt(formatter)?,
+                MountedPathPart::Position(position) => write!(formatter, "#{position}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) trait ElementLifecycleFactory: fmt::Debug {
+    fn element_type_id(&self) -> TypeId;
     fn instance_id(&self) -> *const ();
-    fn contains_owner(&self, owner: OwnerId) -> bool;
+    fn as_any(&self) -> &dyn Any;
+    fn mount(&self, services: &ContextServices) -> Box<dyn MountedElementLifecycle>;
+}
+
+pub(crate) trait MountedElementLifecycle {
+    fn element_type_id(&self) -> TypeId;
+    fn instance_id(&self) -> *const ();
+    fn update_from(&mut self, factory: &dyn ElementLifecycleFactory) -> bool;
+    fn collect_owners(&self, owners: &mut HashSet<OwnerId>);
     fn render_snapshot(
         &mut self,
         dirty: &HashSet<OwnerId>,
@@ -46,22 +67,21 @@ pub(crate) trait NestedComponentHost {
     fn unmount(&mut self);
 }
 
-struct TypedNestedFactory<C: Render> {
+struct TypedElementFactory<C: Element> {
     component: Rc<C>,
-    event_registrar: Option<fn(&C, &mut Context<C>, &mut EventBindings)>,
 }
 
-impl<C: Render> fmt::Debug for TypedNestedFactory<C> {
+impl<C: Element> fmt::Debug for TypedElementFactory<C> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("NestedComponent")
-            .field("component_type", &std::any::type_name::<C>())
+            .debug_struct("ElementLifecycle")
+            .field("element_type", &std::any::type_name::<C>())
             .finish_non_exhaustive()
     }
 }
 
-impl<C: Render> NestedComponentFactory for TypedNestedFactory<C> {
-    fn component_type_id(&self) -> TypeId {
+impl<C: Element> ElementLifecycleFactory for TypedElementFactory<C> {
+    fn element_type_id(&self) -> TypeId {
         TypeId::of::<C>()
     }
 
@@ -69,92 +89,56 @@ impl<C: Render> NestedComponentFactory for TypedNestedFactory<C> {
         Rc::as_ptr(&self.component).cast()
     }
 
-    fn mount(&self, services: &ContextServices) -> Box<dyn NestedComponentHost> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn mount(&self, services: &ContextServices) -> Box<dyn MountedElementLifecycle> {
         let context = services.context::<C>();
-        let host = match self.event_registrar {
-            Some(registrar) => {
-                ComponentHost::new_with_event_registrar(self.component.clone(), context, registrar)
-            }
-            None => ComponentHost::new(self.component.clone(), context),
-        };
-        Box::new(host)
+        Box::new(ElementHost::new(self.component.clone(), context))
     }
 }
 
-pub(crate) fn nested_component_factory<C: Render>(
+pub(crate) fn element_lifecycle_factory<C: Element>(
     component: Rc<C>,
-) -> Rc<dyn NestedComponentFactory> {
-    Rc::new(TypedNestedFactory {
-        component,
-        event_registrar: None,
-    })
-}
-
-pub(crate) fn nested_eventful_factory<C: Render + Eventful>(
-    component: Rc<C>,
-) -> Rc<dyn NestedComponentFactory> {
-    Rc::new(TypedNestedFactory {
-        component,
-        event_registrar: Some(register_events::<C>),
-    })
+) -> Rc<dyn ElementLifecycleFactory> {
+    Rc::new(TypedElementFactory { component })
 }
 
 #[doc(hidden)]
-pub struct ComponentHost<C: Render> {
+pub struct ElementHost<C: Lifecycle> {
     component: Rc<C>,
     context: Context<C>,
     template: Option<ElementNode>,
     element: Option<Rc<ElementNode>>,
-    children: HashMap<GlobalElementId, Box<dyn NestedComponentHost>>,
+    children: HashMap<MountedPath, Box<dyn MountedElementLifecycle>>,
+    child_order: Vec<MountedPath>,
+    owner_index: HashSet<OwnerId>,
     event_bindings: EventBindings,
-    event_registrar: Option<fn(&C, &mut Context<C>, &mut EventBindings)>,
     mounted: bool,
     unmounted: bool,
 }
 
-impl<C: Render> ComponentHost<C> {
+impl<C: Lifecycle> ElementHost<C> {
     #[must_use]
     pub fn new(component: Rc<C>, context: Context<C>) -> Self {
         let event_context = context.event_context();
+        let owner_index = HashSet::from([context.owner]);
         Self {
             component,
             context,
             template: None,
             element: None,
             children: HashMap::new(),
+            child_order: Vec::new(),
+            owner_index,
             event_bindings: EventBindings::new(event_context),
-            event_registrar: None,
             mounted: false,
             unmounted: false,
         }
     }
 
-    /// Creates a host that invokes the optional [`Eventful`] capability once at mount.
-    #[must_use]
-    pub fn new_eventful(component: Rc<C>, context: Context<C>) -> Self
-    where
-        C: Eventful,
-    {
-        Self::new_with_event_registrar(component, context, register_events::<C>)
-    }
-
-    /// Creates a host with an erased event-binding hook.
-    ///
-    /// This is used by platform adapters that select the optional [`Eventful`] capability without
-    /// adding that capability as a bound on every [`Render`] value.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn new_with_event_registrar(
-        component: Rc<C>,
-        context: Context<C>,
-        registrar: fn(&C, &mut Context<C>, &mut EventBindings),
-    ) -> Self {
-        let mut host = Self::new(component, context);
-        host.event_registrar = Some(registrar);
-        host
-    }
-
-    /// Renders the component inside its explicit reactive observer.
+    /// Renders the Element inside its explicit reactive observer.
     ///
     /// # Errors
     ///
@@ -165,7 +149,7 @@ impl<C: Render> ComponentHost<C> {
         self.element.as_deref().ok_or(RenderError::MissingElement)
     }
 
-    /// Renders only owners present in `dirty`, preserving clean component snapshots.
+    /// Renders only owners present in `dirty`, preserving clean Element snapshots.
     #[doc(hidden)]
     pub fn render_dirty(&mut self, dirty: &[OwnerId]) -> Result<&ElementNode, RenderError> {
         let dirty = dirty.iter().copied().collect();
@@ -176,11 +160,7 @@ impl<C: Render> ComponentHost<C> {
     #[doc(hidden)]
     #[must_use]
     pub fn contains_owner(&self, owner: OwnerId) -> bool {
-        self.context.owner == owner
-            || self
-                .children
-                .values()
-                .any(|child| child.contains_owner(owner))
+        self.owner_index.contains(&owner)
     }
 
     fn render_with(&mut self, dirty: &HashSet<OwnerId>, force: bool) -> Result<(), RenderError> {
@@ -200,8 +180,7 @@ impl<C: Render> ComponentHost<C> {
             let component = self.component.clone();
             let mut rendered = registry
                 .observe(owner, || {
-                    component
-                        .render(&mut self.context)
+                    Lifecycle::render(component.as_ref(), &mut self.context)
                         .into_element()
                         .into_element_node()
                 })
@@ -213,10 +192,19 @@ impl<C: Render> ComponentHost<C> {
         let mut resolved = self.template.clone().ok_or(RenderError::MissingElement)?;
         let mut path = Vec::new();
         let mut seen = HashSet::new();
-        self.resolve_components(&mut resolved, dirty, &mut path, &mut seen)?;
+        let mut next_order = Vec::new();
+        self.resolve_components(
+            &mut resolved,
+            dirty,
+            &mut path,
+            &mut seen,
+            &mut next_order,
+            0,
+        )?;
         let removed = self
-            .children
-            .keys()
+            .child_order
+            .iter()
+            .rev()
             .filter(|id| !seen.contains(*id))
             .cloned()
             .collect::<Vec<_>>();
@@ -225,37 +213,49 @@ impl<C: Render> ComponentHost<C> {
                 child.unmount();
             }
         }
+        self.child_order = next_order;
+        self.rebuild_owner_index();
         self.element = Some(Rc::new(resolved));
         Ok(())
+    }
+
+    fn rebuild_owner_index(&mut self) {
+        let mut owners = HashSet::from([self.context.owner]);
+        for id in &self.child_order {
+            if let Some(child) = self.children.get(id) {
+                child.collect_owners(&mut owners);
+            }
+        }
+        self.owner_index = owners;
     }
 
     fn resolve_components(
         &mut self,
         node: &mut ElementNode,
         dirty: &HashSet<OwnerId>,
-        path: &mut Vec<crate::ElementId>,
-        seen: &mut HashSet<GlobalElementId>,
+        path: &mut Vec<MountedPathPart>,
+        seen: &mut HashSet<MountedPath>,
+        order: &mut Vec<MountedPath>,
+        position: usize,
     ) -> Result<(), RenderError> {
-        let has_id = if let Some(id) = node.element_id_value().cloned() {
-            path.push(id);
-            true
+        if let Some(id) = node.element_id_value().cloned() {
+            path.push(MountedPathPart::Semantic(id));
         } else {
-            false
-        };
+            path.push(MountedPathPart::Position(position));
+        }
 
-        if let Some(factory) = node.component_factory() {
-            if !has_id {
-                return Err(RenderError::MissingComponentId);
-            }
-            let id = GlobalElementId::new(path.iter().cloned());
+        if let Some(factory) = node.lifecycle_factory() {
+            let id = MountedPath(path.clone());
             if !seen.insert(id.clone()) {
-                return Err(RenderError::DuplicateComponentId(id));
+                return Err(RenderError::DuplicateElementIdentity(id.to_string()));
             }
-            let replace = self.children.get(&id).is_none_or(|child| {
-                child.component_type_id() != factory.component_type_id()
-                    || child.instance_id() != factory.instance_id()
-            });
-            if replace {
+            order.push(id.clone());
+            let replace = self
+                .children
+                .get(&id)
+                .is_some_and(|child| child.element_type_id() != factory.element_type_id());
+            let insert = !self.children.contains_key(&id) || replace;
+            if insert {
                 if let Some(mut previous) = self.children.remove(&id) {
                     previous.unmount();
                 }
@@ -266,30 +266,35 @@ impl<C: Render> ComponentHost<C> {
                 .children
                 .get_mut(&id)
                 .ok_or(RenderError::MissingElement)?;
-            let snapshot = child.render_snapshot(dirty, replace)?;
-            node.set_component_child(snapshot.as_ref().clone());
+            let configuration_changed = !insert
+                && child.instance_id() != factory.instance_id()
+                && child.update_from(factory.as_ref());
+            let snapshot = child.render_snapshot(dirty, insert || configuration_changed)?;
+            node.set_rendered_child(snapshot.as_ref().clone());
         } else {
-            for child in node.child_nodes_mut() {
-                self.resolve_components(child, dirty, path, seen)?;
+            for (position, child) in node.child_nodes_mut().iter_mut().enumerate() {
+                self.resolve_components(child, dirty, path, seen, order, position)?;
             }
         }
 
-        if has_id {
-            path.pop();
-        }
+        path.pop();
         Ok(())
     }
 
     pub fn did_paint(&mut self) {
         if !self.unmounted && self.element.is_some() && !self.mounted {
-            if let Some(register) = self.event_registrar.take() {
-                register(&self.component, &mut self.context, &mut self.event_bindings);
-            }
-            self.component.on_mount(&mut self.context);
+            Lifecycle::bind_events(
+                self.component.as_ref(),
+                &mut self.context,
+                &mut self.event_bindings,
+            );
+            Lifecycle::on_mount(self.component.as_ref(), &mut self.context);
             self.mounted = true;
         }
-        for child in self.children.values_mut() {
-            child.did_paint();
+        for id in self.child_order.clone() {
+            if let Some(child) = self.children.get_mut(&id) {
+                child.did_paint();
+            }
         }
     }
 
@@ -297,13 +302,16 @@ impl<C: Render> ComponentHost<C> {
         if self.unmounted {
             return;
         }
-        for child in self.children.values_mut() {
-            child.unmount();
+        for id in self.child_order.iter().rev() {
+            if let Some(child) = self.children.get_mut(id) {
+                child.unmount();
+            }
         }
         self.children.clear();
+        self.child_order.clear();
         self.context.deactivate_owner();
         if self.mounted {
-            self.component.on_unmount(&mut self.context);
+            Lifecycle::on_unmount(self.component.as_ref(), &mut self.context);
         }
         let _removed = self.context.registry.remove_owner(self.context.owner);
         self.element = None;
@@ -324,18 +332,10 @@ impl<C: Render> ComponentHost<C> {
     pub fn reactive_stats(&self) -> ReactiveStats {
         self.context.registry.stats()
     }
-
-    #[must_use]
-    pub fn render_once<R: RenderOnce>(renderer: R, mut context: Context<R>) -> ElementNode {
-        renderer
-            .render(&mut context)
-            .into_element()
-            .into_element_node()
-    }
 }
 
-impl<C: Render> NestedComponentHost for ComponentHost<C> {
-    fn component_type_id(&self) -> TypeId {
+impl<C: Element> MountedElementLifecycle for ElementHost<C> {
+    fn element_type_id(&self) -> TypeId {
         TypeId::of::<C>()
     }
 
@@ -343,8 +343,16 @@ impl<C: Render> NestedComponentHost for ComponentHost<C> {
         Rc::as_ptr(&self.component).cast()
     }
 
-    fn contains_owner(&self, owner: OwnerId) -> bool {
-        Self::contains_owner(self, owner)
+    fn update_from(&mut self, factory: &dyn ElementLifecycleFactory) -> bool {
+        let Some(factory) = factory.as_any().downcast_ref::<TypedElementFactory<C>>() else {
+            return false;
+        };
+        self.component = factory.component.clone();
+        true
+    }
+
+    fn collect_owners(&self, owners: &mut HashSet<OwnerId>) {
+        owners.extend(self.owner_index.iter().copied());
     }
 
     fn render_snapshot(
@@ -365,15 +373,7 @@ impl<C: Render> NestedComponentHost for ComponentHost<C> {
     }
 }
 
-fn register_events<C: Render + Eventful>(
-    component: &C,
-    context: &mut Context<C>,
-    bindings: &mut EventBindings,
-) {
-    component.bind_events(context, bindings);
-}
-
-impl<C: Render> Drop for ComponentHost<C> {
+impl<C: Lifecycle> Drop for ElementHost<C> {
     fn drop(&mut self) {
         self.unmount();
     }

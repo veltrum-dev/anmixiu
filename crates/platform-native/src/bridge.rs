@@ -92,8 +92,6 @@ pub enum FrameBuildError {
     Text(#[from] TextError),
     #[error("duplicate semantic element identity `{0}` in one rendered tree")]
     DuplicateElementId(GlobalElementId),
-    #[error("nested component boundary must contain exactly one rendered child")]
-    UnresolvedComponent,
     #[error("text atlas changed during {attempts} consecutive attempts to build one frame")]
     TextAtlasUnstable { attempts: usize },
 }
@@ -453,7 +451,7 @@ impl FrameBuilder {
 
     /// Bumps the paint revision so the next `build` rebuilds the scene against updated scroll
     /// offsets. Scroll state lives in app-owned handles read at scene-build time (not during
-    /// component render), so a wheel gesture is not observed by the reactive owner; the platform
+    /// Element lifecycle render), so a wheel gesture is not observed by the reactive owner; the platform
     /// calls this to force the repaint instead. Layout is untouched — scrolling never relays out.
     pub fn note_scrolled(&mut self) {
         self.paint_generation = self.paint_generation.saturating_add(1);
@@ -923,26 +921,6 @@ fn project_node(
     path: &mut Vec<ElementId>,
     seen: &mut HashSet<GlobalElementId>,
 ) -> Result<LayoutNode, FrameBuildError> {
-    if element.kind_name() == "component" {
-        let Some(element_id) = element.element_id() else {
-            return Err(FrameBuildError::UnresolvedComponent);
-        };
-        let [child] = element.children_ref() else {
-            return Err(FrameBuildError::UnresolvedComponent);
-        };
-        path.push(element_id.clone());
-        let projected = project_node(
-            child,
-            inherited_foreground,
-            parent,
-            next_id,
-            nodes,
-            path,
-            seen,
-        );
-        path.pop();
-        return projected;
-    }
     let id = LayoutNodeId(*next_id);
     *next_id = next_id.saturating_add(1);
     let has_semantic_id = if let Some(element_id) = element.element_id() {

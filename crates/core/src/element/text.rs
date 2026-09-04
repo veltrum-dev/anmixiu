@@ -1,4 +1,4 @@
-use crate::SharedString;
+use crate::{Lifecycle, SharedString};
 
 use super::{
     node::{ElementBase, ElementKind, ElementNode},
@@ -29,11 +29,7 @@ impl Element for TextElement {
     }
 }
 
-impl Element for SharedString {
-    fn into_element_node(self) -> ElementNode {
-        text(self).into_element_node()
-    }
-}
+impl Lifecycle for TextElement {}
 
 #[must_use]
 pub fn text(value: impl Into<SharedString>) -> TextElement {

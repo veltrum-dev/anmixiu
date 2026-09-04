@@ -7,14 +7,13 @@ use std::{
 };
 
 use anmixiu_core::{
-    AppEvents, AppHandle, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element,
-    ElementId, ElementNode, EventBindings, EventError, EventPriority, EventScope, Eventful,
-    FluentBuilder, InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, ParentElement,
-    Pixels, PropertyUpdate, Render, RenderOnce, ScrollHandle, SharedString, State,
-    StatefulInteractiveElement, Styled, Typography, Window, WindowAction, WindowDispatcher,
-    WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot,
-    WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility, button, component, div,
-    eventful_component, px, shared_format, text,
+    AppEvents, AppHandle, AppStateStore, Color, Context, CursorStyle, Element, ElementHost,
+    ElementId, EventError, EventPriority, EventScope, FluentBuilder, InteractiveElement, Lifecycle,
+    MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, ParentElement, Pixels, PropertyUpdate,
+    ScrollHandle, SharedString, State, StatefulInteractiveElement, Style, Styled, Typography,
+    Window, WindowAction, WindowDispatcher, WindowError, WindowHandle, WindowId, WindowInfo,
+    WindowMode, WindowMountContext, WindowRoot, WindowStateStore, WindowStatus, WindowUpdate,
+    WindowVisibility, button, div, px, shared_format, text,
 };
 use anmixiu_reactive::OwnerRegistry;
 use anmixiu_reactive::Signal;
@@ -22,12 +21,24 @@ use anmixiu_runtime::AppRuntime;
 
 #[derive(Default)]
 struct LifecycleProbe {
+    style: Style,
     renders: Cell<usize>,
     mounts: Cell<usize>,
     unmounts: Cell<usize>,
 }
 
-impl Render for LifecycleProbe {
+impl Styled for LifecycleProbe {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Element for LifecycleProbe {}
+
+impl Lifecycle for LifecycleProbe {
     fn on_mount(&self, _cx: &mut Context<Self>) {
         self.mounts.set(self.mounts.get() + 1);
     }
@@ -43,9 +54,9 @@ impl Render for LifecycleProbe {
 }
 
 #[test]
-fn render_borrows_component_and_lifecycle_runs_once_after_first_paint() {
+fn render_borrows_element_and_lifecycle_runs_once_after_first_paint() {
     let probe = Rc::new(LifecycleProbe::default());
-    let mut host = ComponentHost::new(probe.clone(), Context::testing());
+    let mut host = ElementHost::new(probe.clone(), Context::testing());
 
     host.render().expect("initial render");
     assert_eq!(probe.renders.get(), 1);
@@ -57,23 +68,6 @@ fn render_borrows_component_and_lifecycle_runs_once_after_first_paint() {
     host.unmount();
     host.unmount();
     assert_eq!(probe.unmounts.get(), 1);
-}
-
-struct OneShot(Cell<bool>);
-
-impl RenderOnce for OneShot {
-    fn render(self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
-        self.0.set(true);
-        text("once")
-    }
-}
-
-#[test]
-fn render_once_consumes_value_and_has_no_lifecycle() {
-    let rendered = Cell::new(false);
-    let element =
-        ComponentHost::<LifecycleProbe>::render_once(OneShot(rendered), Context::testing());
-    assert_eq!(element.kind_name(), "text");
 }
 
 #[derive(Default)]
@@ -349,11 +343,23 @@ fn app_and_window_handles_open_update_query_and_close_without_ambiguous_defaults
 }
 
 struct WindowContextProbe {
+    style: Style,
     seen_window: Rc<Cell<Option<WindowId>>>,
     seen_window_count: Rc<Cell<usize>>,
 }
 
-impl Render for WindowContextProbe {
+impl Styled for WindowContextProbe {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Element for WindowContextProbe {}
+
+impl Lifecycle for WindowContextProbe {
     fn render(&self, cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
         let window = cx.window();
         self.seen_window.set(Some(window.id()));
@@ -374,6 +380,7 @@ fn erased_window_root_injects_the_stable_owner_window_and_app_handles() {
     let seen_window = Rc::new(Cell::new(None));
     let seen_window_count = Rc::new(Cell::new(0));
     let root = WindowRoot::new(WindowContextProbe {
+        style: Style::default(),
         seen_window: seen_window.clone(),
         seen_window_count: seen_window_count.clone(),
     });
@@ -423,25 +430,36 @@ fn fluent_conditionals_preserve_the_builder_type_and_only_apply_selected_branche
     assert_eq!(labels, ["when", "then", "optional"]);
 }
 
-struct Badge(SharedString);
+struct Badge {
+    style: Style,
+    label: SharedString,
+}
 
-impl Element for Badge {
-    fn into_element_node(self) -> ElementNode {
-        div()
-            .padding(px(4.0))
-            .child(text(self.0))
-            .into_element_node()
+impl Styled for Badge {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+
+    fn style_ref(&self) -> &Style {
+        &self.style
     }
 }
 
+impl anmixiu_core::Lifecycle for Badge {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        div().padding(px(4.0)).child(text(self.label.clone()))
+    }
+}
+
+impl Element for Badge {}
+
 #[test]
-fn custom_elements_implement_element_not_component_render() {
-    let tree = div().child(Badge(SharedString::new_static("custom")));
-    assert_eq!(tree.children_ref()[0].kind_name(), "div");
-    assert_eq!(
-        tree.children_ref()[0].children_ref()[0].text_content(),
-        Some("custom")
-    );
+fn custom_elements_receive_the_default_lifecycle_projection() {
+    let tree = div().child(Badge {
+        style: Style::default(),
+        label: SharedString::new_static("custom"),
+    });
+    assert_eq!(tree.children_ref()[0].kind_name(), "element");
 }
 
 fn styled_card<E: Styled>(element: E) -> E {
@@ -734,16 +752,14 @@ struct EventfulProbe {
     count: Signal<u32>,
 }
 
-impl Eventful for EventfulProbe {
+impl Lifecycle for EventfulProbe {
     fn bind_events(&self, _cx: &mut Context<Self>, bindings: &mut anmixiu_core::EventBindings) {
         let count = self.count.clone();
         bindings.subscribe::<Ping, _>(EventScope::App, 0, move |_| {
             count.update(|value| *value += 1);
         });
     }
-}
 
-impl Render for EventfulProbe {
     fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
         text(self.count.get().to_string())
     }
@@ -760,7 +776,7 @@ fn eventful_capability_binds_once_when_host_paints() {
     );
     let emitter = context.event_context();
     let probe = Rc::new(EventfulProbe::default());
-    let mut host = ComponentHost::new_eventful(probe.clone(), context);
+    let mut host = ElementHost::new(probe.clone(), context);
 
     host.render().expect("initial render");
     host.did_paint();
@@ -966,18 +982,18 @@ struct Counter {
     unrelated: Signal<u32>,
 }
 
-impl Render for Counter {
+impl Lifecycle for Counter {
     fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
         text(format!("Count: {}", self.count.get()))
     }
 }
 
 #[test]
-fn signal_component_rerender_contract_uses_shared_signal_handle() {
+fn signal_element_rerender_contract_uses_shared_signal_handle() {
     let component = Rc::new(Counter::default());
     let count = component.count.clone();
     assert_eq!(count.get(), 0);
-    let mut host = ComponentHost::new(component.clone(), Context::testing());
+    let mut host = ElementHost::new(component.clone(), Context::testing());
     host.render().unwrap();
     assert_eq!(count.subscriber_count(), 1);
     assert_eq!(component.unrelated.subscriber_count(), 0);
@@ -1010,7 +1026,7 @@ struct SpawnOnMount {
     dropped: Rc<Cell<bool>>,
 }
 
-impl Render for SpawnOnMount {
+impl Lifecycle for SpawnOnMount {
     fn on_mount(&self, cx: &mut Context<Self>) {
         let guard = DropFlag(self.dropped.clone());
         cx.spawn(async move {
@@ -1026,7 +1042,7 @@ impl Render for SpawnOnMount {
 }
 
 #[test]
-fn component_owner_cancels_context_tasks_on_unmount() {
+fn element_owner_cancels_context_tasks_on_unmount() {
     let runtime = AppRuntime::new(|| {}).unwrap();
     let owners = OwnerRegistry::new();
     let spawner = runtime.ui().spawner(owners.clone());
@@ -1040,7 +1056,7 @@ fn component_owner_cancels_context_tasks_on_unmount() {
     let component = Rc::new(SpawnOnMount {
         dropped: dropped.clone(),
     });
-    let mut host = ComponentHost::new(component, context);
+    let mut host = ElementHost::new(component, context);
     host.render().unwrap();
     host.did_paint();
     runtime.ui().run_ready().unwrap();
@@ -1078,7 +1094,7 @@ fn context_spawn_reports_runtime_capacity_without_panicking() {
 #[test]
 fn rendered_element_snapshots_share_the_tree_until_the_next_render() {
     let probe = Rc::new(LifecycleProbe::default());
-    let mut host = ComponentHost::new(probe, Context::testing());
+    let mut host = ElementHost::new(probe, Context::testing());
     host.render().unwrap();
     let first = host.element_snapshot().unwrap();
     let shared = host.element_snapshot().unwrap();
@@ -1089,177 +1105,20 @@ fn rendered_element_snapshots_share_the_tree_until_the_next_render() {
     assert!(!Rc::ptr_eq(&first, &second));
 }
 
-#[derive(Default)]
-struct NestedLifecycle {
-    mounts: Cell<usize>,
-    renders: Cell<usize>,
-    unmounts: Cell<usize>,
-    value: Signal<u32>,
-}
-
-impl Render for NestedLifecycle {
-    fn on_mount(&self, _cx: &mut Context<Self>) {
-        self.mounts.set(self.mounts.get() + 1);
-    }
-
-    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
-        self.renders.set(self.renders.get() + 1);
-        button(shared_format!("nested {}", self.value.get()))
-            .id("nested-value")
-            .on_click(|| async {})
-    }
-
-    fn on_unmount(&self, _cx: &mut Context<Self>) {
-        self.unmounts.set(self.unmounts.get() + 1);
-    }
-}
-
-struct NestedParent {
-    renders: Cell<usize>,
-    show_child: Signal<bool>,
-    child: Rc<NestedLifecycle>,
-}
-
-impl Render for NestedParent {
-    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
-        self.renders.set(self.renders.get() + 1);
-        div().when(self.show_child.get(), |parent| {
-            parent.child(component(self.child.clone()).id("nested-counter"))
-        })
-    }
-}
-
-#[test]
-fn nested_render_components_have_independent_owners_and_lifecycle() {
-    let child = Rc::new(NestedLifecycle::default());
-    let parent = Rc::new(NestedParent {
-        renders: Cell::new(0),
-        show_child: Signal::new(true),
-        child: child.clone(),
-    });
-    let context = Context::testing();
-    let owners = context.owner_registry().clone();
-    let root_owner = context.owner_id();
-    let mut host = ComponentHost::new(parent.clone(), context);
-
-    host.render().expect("initial component tree renders");
-    host.did_paint();
-    assert_eq!(parent.renders.get(), 1);
-    assert_eq!(child.renders.get(), 1);
-    assert_eq!(child.mounts.get(), 1);
-    assert_eq!(host.reactive_stats().live_owner_count, 2);
-
-    child.value.set(1);
-    let dirty = owners.take_dirty();
-    assert_eq!(dirty.len(), 1);
-    assert_ne!(dirty[0], root_owner, "only the nested owner became dirty");
-    host.render_dirty(&dirty)
-        .expect("dirty nested component rerenders");
-    assert_eq!(parent.renders.get(), 1, "parent render was reused");
-    assert_eq!(child.renders.get(), 2);
-    let child_owner = dirty[0];
-    assert_eq!(
-        host.element()
-            .and_then(|root| root.children_ref().first())
-            .and_then(|boundary| boundary.children_ref().first())
-            .and_then(ElementNode::text_content),
-        Some("nested 1")
-    );
-    assert_eq!(
-        host.element()
-            .and_then(|root| root.children_ref().first())
-            .and_then(|boundary| boundary.children_ref().first())
-            .and_then(ElementNode::click_handler)
-            .and_then(anmixiu_core::ClickHandler::owner_id),
-        Some(child_owner),
-        "async handlers inherit the nested component owner"
-    );
-
-    parent.show_child.set(false);
-    let dirty = owners.take_dirty();
-    host.render_dirty(&dirty)
-        .expect("parent removes nested component");
-    assert_eq!(parent.renders.get(), 2);
-    assert_eq!(child.unmounts.get(), 1);
-    assert_eq!(host.reactive_stats().live_owner_count, 1);
-}
-
-struct NestedEventful {
-    deliveries: Rc<Cell<usize>>,
-}
-
-impl Render for NestedEventful {
-    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
-        text("eventful child")
-    }
-}
-
-impl Eventful for NestedEventful {
-    fn bind_events(&self, _cx: &mut Context<Self>, bindings: &mut EventBindings) {
-        let deliveries = self.deliveries.clone();
-        bindings.subscribe::<Ping, _>(EventScope::Window, EventPriority::NORMAL, move |_| {
-            deliveries.set(deliveries.get() + 1);
-        });
-    }
-}
-
-struct NestedEventParent(Rc<NestedEventful>);
-
-impl Render for NestedEventParent {
-    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
-        div().child(eventful_component(self.0.clone()).id("eventful-child"))
-    }
-}
-
-#[test]
-fn nested_eventful_bindings_follow_the_child_lifecycle() {
-    let events = AppEvents::new();
-    let window_id = WindowId::new(41);
-    let context = Context::testing_with_state_and_events(
-        AppStateStore::new(),
-        WindowStateStore::new(),
-        events.clone(),
-        window_id,
-    );
-    let deliveries = Rc::new(Cell::new(0));
-    let child = Rc::new(NestedEventful {
-        deliveries: deliveries.clone(),
-    });
-    let mut host = ComponentHost::new(Rc::new(NestedEventParent(child)), context);
-    host.render().expect("nested eventful tree renders");
-    host.did_paint();
-
-    let emitter = Context::<LifecycleProbe>::testing_with_state_and_events(
-        AppStateStore::new(),
-        WindowStateStore::new(),
-        events,
-        window_id,
-    );
-    emitter
-        .emit(Ping, EventScope::Window)
-        .expect("mounted child receives event");
-    assert_eq!(deliveries.get(), 1);
-    host.unmount();
-    emitter
-        .emit(Ping, EventScope::Window)
-        .expect("router remains live after child unmount");
-    assert_eq!(deliveries.get(), 1);
-}
-
 struct ScrollOwner(ScrollHandle);
 
-impl Render for ScrollOwner {
+impl Lifecycle for ScrollOwner {
     fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
         div().scroll(&self.0).child(text("scroll content"))
     }
 }
 
 #[test]
-fn programmatic_scroll_marks_the_owning_component_dirty() {
+fn programmatic_scroll_marks_the_owning_element_dirty() {
     let handle = ScrollHandle::new();
     let context = Context::testing();
     let owners = context.owner_registry().clone();
-    let mut host = ComponentHost::new(Rc::new(ScrollOwner(handle.clone())), context);
+    let mut host = ElementHost::new(Rc::new(ScrollOwner(handle.clone())), context);
     host.render().expect("scroll owner renders");
 
     handle.set_offset_y(20.0);

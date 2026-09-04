@@ -152,9 +152,8 @@ pub trait InteractiveElement: Sized {
     }
 
     #[must_use]
-    fn id(mut self, id: impl Into<ElementId>) -> Stateful<Self> {
-        self.assign_element_id(id.into());
-        Stateful::new(self)
+    fn id(self, id: impl Into<ElementId>) -> Stateful<Self> {
+        Stateful::new(self, id.into())
     }
 }
 
@@ -181,11 +180,11 @@ pub trait StatefulInteractiveElement: Sized {
 
 impl<E: InteractiveElement> InteractiveElement for Stateful<E> {
     fn assign_element_id(&mut self, id: ElementId) {
-        self.inner_mut().assign_element_id(id);
+        self.id = id;
     }
 
     fn element_id(&self) -> Option<&ElementId> {
-        self.inner().element_id()
+        Some(&self.id)
     }
 
     fn assign_click_handler(&mut self, handler: ClickHandler) {

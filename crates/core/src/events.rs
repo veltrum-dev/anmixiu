@@ -460,7 +460,7 @@ impl Drop for Subscription {
     }
 }
 
-/// Owns all subscriptions declared by one Eventful Element.
+/// Owns all subscriptions declared by one mounted Element lifecycle.
 #[derive(Debug)]
 pub struct EventBindings {
     context: EventContext,

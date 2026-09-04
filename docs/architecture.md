@@ -25,10 +25,11 @@ unsafe Rust.
 
 ## Update pipeline
 
-Within an explicit component render observer, reading a `Signal` records one owner/source edge.
+Within an explicit mounted-Element render observer, reading a `Signal` records one owner/source edge.
 A write mutates the value and inserts each live dependent owner into a deduplicated dirty queue; it
-never renders inline. The window requests one display turn. The retained component host rerenders
-only matching dirty owners and reuses every clean component snapshot, then layout and scene caches
+never scans the Element tree or renders inline. The window requests one display turn. The retained
+lifecycle tree routes each dirty owner directly to its mounted Element, rerenders only matching
+owners, and reuses every clean Element snapshot; layout and scene caches then
 reuse entries whose complete revision keys still match. A clean turn submits no GPU work, and a
 normal display turn presents at most one scene snapshot. Invalidations raised during render are moved
 to the next turn and guarded against an infinite render loop.
@@ -42,7 +43,7 @@ precedence over application state.
 `Window` is a portable creation configuration. Its optional title means “inherit the application
 name”; an explicit empty `SharedString` remains an intentionally empty title. Native adapters
 resolve that configuration into a `WindowInfo` snapshot and retain it behind `WindowHandle`.
-Reading the snapshot during render subscribes the component owner, so native resize, scale, focus,
+Reading the snapshot during render subscribes the mounted Element owner, so native resize, scale, focus,
 visibility, and presentation-mode changes invalidate the appropriate frame without synchronous
 AppKit or Win32 queries from application code.
 
@@ -75,18 +76,20 @@ frame-local indices and are never exposed as application identity.
 
 ## Shared values and conditional builders
 
-Custom elements implement `Element`; persistent components implement `Render`. Built-ins are
-concrete `DivElement`, `TextElement`, and `ButtonElement` values. `Styled`, `ParentElement`,
-`InteractiveElement`, and `StatefulInteractiveElement` isolate style, tree, identity, and handler
-capabilities. The heterogeneous `ElementNode` projection is doc-hidden and exists only because a
-single child vector must hold different concrete element types across crate boundaries.
+Every public UI value implements `Element: Styled + Lifecycle`. Built-ins are concrete
+`DivElement`, `TextElement`, and `ButtonElement` primitive fast paths. A custom Element used as a
+child becomes a real neutral layout box and retains its own typed lifecycle host and reactive owner;
+its `Lifecycle::render` output becomes content below that box. `ParentElement`,
+`InteractiveElement`, and `StatefulInteractiveElement` remain optional capabilities. The
+heterogeneous `ElementNode` projection is doc-hidden and exists only across internal crate
+boundaries.
 
-`component(stable_rc).id(...)` inserts a transparent persistent component boundary. Its semantic
-path retains one typed `ComponentHost`, independent reactive owner, lifecycle, event bindings, and
-owner-bound tasks across parent renders. `eventful_component` opts the nested host into `Eventful`.
-Dirty child owners rebuild only their retained subtree snapshot; removing or replacing the keyed
-boundary synchronously unmounts that host. Async element handlers carry the producing component's
-owner through the frame projection so their futures are cancelled with the correct subtree.
+Unkeyed mounted identity is `(parent, sibling position, Rust TypeId)`; `.id(...)` replaces the
+position with caller-provided semantic identity. Re-rendering a parent with a new value of the same
+identity updates that Element's configuration and observer without repeating mount. A successful
+first paint calls `on_mount` parent-to-child and left-to-right. Removal calls `on_unmount` in the
+exact reverse order. Signal writes route directly to the subscribed owner; unchanged siblings do
+not execute `render`.
 
 Built-ins have minimal usable defaults rather than being aliases for a generic node. `DivElement`
 defaults to a neutral Flex column container, `TextElement` inherits foreground and uses native text
@@ -130,13 +133,11 @@ type while supporting optional subtrees, styles, and handlers.
 
 ## Typed events
 
-`Eventful` is an optional Element capability, separate from `Render` and `IntoElement`. A host that
-opts into the capability invokes `bind_events` once after the first frame is painted; the
+`Lifecycle::bind_events` is a default no-op hook invoked once after the first frame is painted. Its
 `EventBindings` value retains each RAII `Subscription` until unmount. Event payloads are ordinary
 Rust values routed by `TypeId`, never string topics. `EventScope::Owner` matches the originating
-persistent Element owner exactly; a future tree-propagation scope will be added only when persistent
-Element parent links are available. `EventScope::Window` restricts delivery to the current window,
-while `EventScope::App` broadcasts through the App-owned router across windows.
+mounted Element owner exactly. `EventScope::Window` restricts delivery to the current window, while
+`EventScope::App` broadcasts through the App-owned router across windows.
 
 Subscriptions carry an `EventPriority`. Higher values dispatch first; equal priorities retain
 registration order. Nested emissions are queued FIFO with a hard pending capacity and a bounded
@@ -163,7 +164,7 @@ Each application owns one Tokio multithread runtime for timers and I/O readiness
 bounded `async-task` queue and are polled only by the active platform's native UI thread: AppKit's
 main thread on macOS and the HWND-owning thread on Windows. Future backends provide an equivalent
 native UI executor without changing the owner contract. `Context::spawn` binds a future to the
-current persistent component owner and returns a structured `SpawnError`, so callers do not retain
+current mounted Element owner and returns a structured `SpawnError`, so callers do not retain
 or detach a task handle and capacity/lifecycle rejection never becomes a framework panic. The Tokio
 runtime uses two workers: enough to remain multithreaded when one I/O task is delayed, without
 scaling idle UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
@@ -258,7 +259,7 @@ scene against mismatched coordinates.
 
 Windows UI-runtime wakes use thread messages whose lifetime is independent of any individual HWND.
 Per-window frame requests are deduplicated through private window messages and a single armed frame
-timer. Component invalidations, hover changes, scroll animation, resize, and paint exposure all
+timer. Element invalidations, hover changes, scroll animation, resize, and paint exposure all
 converge on that path. Pointer coordinates are converted from physical client pixels to logical
 pixels; button capture preserves down/up delivery, and wheel messages preserve signed coordinates
 on monitors with negative desktop origins.

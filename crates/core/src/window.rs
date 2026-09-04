@@ -8,8 +8,8 @@ use anmixiu_runtime::UiSpawner;
 use thiserror::Error;
 
 use crate::{
-    AppEvents, AppStateStore, ComponentHost, Context, ElementNode, EventBindings, Eventful, Pixels,
-    Render, RenderError, SharedString, Typography, WindowId, WindowStateStore, px,
+    AppEvents, AppStateStore, Context, Element, ElementHost, ElementNode, Lifecycle, Pixels,
+    RenderError, SharedString, Typography, WindowId, WindowStateStore, px,
 };
 
 /// A window content-area size measured in logical pixels.
@@ -315,34 +315,20 @@ impl AppHandle {
         }
     }
 
-    /// Opens a native window whose persistent root implements [`Render`].
+    /// Opens a native window whose persistent root implements [`Element`].
     ///
     /// # Errors
     ///
     /// Returns an error if the application has stopped or the bounded command queue cannot accept
     /// the operation. Native creation is performed by the UI event loop; a later platform failure
     /// is returned from `App::run` as the platform's `AppError`.
-    pub fn open_window<C: Render>(
+    pub fn open_window<C: Element>(
         &self,
         window: Window,
         root: C,
     ) -> Result<WindowHandle, WindowError> {
         self.dispatcher()?
             .open_window(window, WindowRoot::new(root))
-    }
-
-    /// Opens a native window and enables its root's optional [`Eventful`] capability.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`open_window`](Self::open_window).
-    pub fn open_eventful_window<C: Render + Eventful>(
-        &self,
-        window: Window,
-        root: C,
-    ) -> Result<WindowHandle, WindowError> {
-        self.dispatcher()?
-            .open_window(window, WindowRoot::new_eventful(root))
     }
 
     /// Returns handles for all currently opening or open windows.
@@ -536,9 +522,9 @@ pub struct WindowMountContext {
     pub spawner: UiSpawner,
 }
 
-/// A mounted component host erased only at the platform boundary.
+/// A mounted Element host erased only at the platform boundary.
 #[doc(hidden)]
-pub trait ErasedComponentHost {
+pub trait ErasedElementHost {
     fn render(&mut self) -> Result<&ElementNode, RenderError>;
     fn render_dirty(&mut self, dirty: &[OwnerId]) -> Result<&ElementNode, RenderError>;
     fn contains_owner(&self, owner: OwnerId) -> bool;
@@ -548,9 +534,9 @@ pub trait ErasedComponentHost {
     fn reactive_stats(&self) -> ReactiveStats;
 }
 
-struct TypedComponentHost<C: Render>(ComponentHost<C>);
+struct TypedElementHost<C: Lifecycle>(ElementHost<C>);
 
-impl<C: Render> ErasedComponentHost for TypedComponentHost<C> {
+impl<C: Lifecycle> ErasedElementHost for TypedElementHost<C> {
     fn render(&mut self) -> Result<&ElementNode, RenderError> {
         self.0.render()
     }
@@ -584,19 +570,28 @@ impl<C: Render> ErasedComponentHost for TypedComponentHost<C> {
 #[doc(hidden)]
 pub struct MountedWindowRoot {
     pub owner: OwnerId,
-    pub host: Box<dyn ErasedComponentHost>,
+    pub host: Box<dyn ErasedElementHost>,
 }
 
 trait MountWindowRoot {
     fn mount(self: Box<Self>, context: WindowMountContext) -> MountedWindowRoot;
 }
 
-struct TypedWindowRoot<C: Render> {
+struct TypedWindowRoot<C: Element> {
     root: C,
-    event_registrar: Option<fn(&C, &mut Context<C>, &mut EventBindings)>,
 }
 
-impl<C: Render> MountWindowRoot for TypedWindowRoot<C> {
+struct WindowElementRoot {
+    root: ElementNode,
+}
+
+impl Lifecycle for WindowElementRoot {
+    fn render(&self, _cx: &mut Context<Self>) -> impl crate::IntoElement {
+        self.root.clone()
+    }
+}
+
+impl<C: Element> MountWindowRoot for TypedWindowRoot<C> {
     fn mount(self: Box<Self>, context: WindowMountContext) -> MountedWindowRoot {
         let WindowMountContext {
             app_state,
@@ -607,7 +602,7 @@ impl<C: Render> MountWindowRoot for TypedWindowRoot<C> {
             owners,
             spawner,
         } = context;
-        let component_context = Context::with_window_services(
+        let component_context: Context<WindowElementRoot> = Context::with_window_services(
             app_state,
             window_state,
             app_events,
@@ -617,16 +612,13 @@ impl<C: Render> MountWindowRoot for TypedWindowRoot<C> {
             &spawner,
         );
         let owner = component_context.owner_id();
-        let component = Rc::new(self.root);
-        let host = match self.event_registrar {
-            Some(registrar) => {
-                ComponentHost::new_with_event_registrar(component, component_context, registrar)
-            }
-            None => ComponentHost::new(component, component_context),
-        };
+        let component = Rc::new(WindowElementRoot {
+            root: self.root.into_element_node(),
+        });
+        let host = ElementHost::new(component, component_context);
         MountedWindowRoot {
             owner,
-            host: Box::new(TypedComponentHost(host)),
+            host: Box::new(TypedElementHost(host)),
         }
     }
 }
@@ -640,24 +632,10 @@ pub struct WindowRoot {
 
 impl WindowRoot {
     #[must_use]
-    pub fn new<C: Render>(root: C) -> Self {
+    pub fn new<C: Element>(root: C) -> Self {
         Self {
             root_type: std::any::type_name::<C>(),
-            inner: Box::new(TypedWindowRoot {
-                root,
-                event_registrar: None,
-            }),
-        }
-    }
-
-    #[must_use]
-    pub fn new_eventful<C: Render + Eventful>(root: C) -> Self {
-        Self {
-            root_type: std::any::type_name::<C>(),
-            inner: Box::new(TypedWindowRoot {
-                root,
-                event_registrar: Some(register_eventful::<C>),
-            }),
+            inner: Box::new(TypedWindowRoot { root }),
         }
     }
 
@@ -670,12 +648,4 @@ impl WindowRoot {
     pub fn mount(self, context: WindowMountContext) -> MountedWindowRoot {
         self.inner.mount(context)
     }
-}
-
-fn register_eventful<C: Render + Eventful>(
-    root: &C,
-    cx: &mut Context<C>,
-    bindings: &mut EventBindings,
-) {
-    root.bind_events(cx, bindings);
 }

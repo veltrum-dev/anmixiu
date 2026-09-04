@@ -52,8 +52,9 @@ editing. Keep rules short, concrete, and enforceable; do not turn this file into
   add these capabilities as methods on a universal element type.
 - Treat `ElementId` as caller-provided semantic identity. Layout, paint, and hit-test indices are
   implementation details and must not become application identity.
-- Keep custom elements on `Element`, persistent components on `Render`, and one-shot element recipes
-  on `RenderOnce` where appropriate. Keep `ElementNode` doc-hidden and internal to crate boundaries.
+- Keep one public UI model: `Element: Styled + Lifecycle`. Custom child Elements retain independent
+  mounted identities; built-ins use primitive fast paths. Keep `ElementNode` doc-hidden and internal
+  to crate boundaries.
 - Use `SharedString` for public immutable UI text. Prefer static/borrowed values on hot paths, `Rc`
   for main-thread retained snapshots, and `Arc` only for genuinely cross-thread immutable data.
 - Use `FluentBuilder::{when, when_else, when_some, when_none}` for conditional builder changes; do
@@ -82,6 +83,9 @@ editing. Keep rules short, concrete, and enforceable; do not turn this file into
   render, layout, paint, or input hot paths.
 - Signal reads subscribe only inside an explicit render observer. Signal writes mark owners dirty for
   the next frame; unmount removes subscriptions and cancels unfinished owner-bound tasks.
+- Route Signal writes directly to stable mounted owners without scanning the Element tree. Mount is
+  deterministic parent-to-child/left-to-right; unmount is its exact reverse. Reusing the same
+  parent/id-or-position/type identity updates configuration without repeating mount.
 - The UI thread must not wait for GPU completion. Any CPU-writable in-flight buffer needs bounded
   ring/pool reuse tied to completion before asynchronous submission is used.
 - Keep logical pixels, scale-adjusted floating coordinates, and integer device pixels distinct. At

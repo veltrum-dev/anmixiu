@@ -3,16 +3,18 @@ use super::{
     style::{Style, Styled},
     traits::{Element, ParentElement},
 };
+use crate::Lifecycle;
 
 /// Type-state wrapper produced after assigning an [`super::ElementId`].
 #[derive(Clone, Debug)]
 pub struct Stateful<E> {
     element: E,
+    pub(crate) id: super::ElementId,
 }
 
 impl<E> Stateful<E> {
-    pub(crate) const fn new(element: E) -> Self {
-        Self { element }
+    pub(crate) const fn new(element: E, id: super::ElementId) -> Self {
+        Self { element, id }
     }
 
     #[must_use]
@@ -52,6 +54,10 @@ impl<E: ParentElement> ParentElement for Stateful<E> {
 
 impl<E: Element> Element for Stateful<E> {
     fn into_element_node(self) -> ElementNode {
-        self.element.into_element_node()
+        let mut node = self.element.into_element_node();
+        node.set_element_id(self.id);
+        node
     }
 }
+
+impl<E: Styled + 'static> Lifecycle for Stateful<E> {}

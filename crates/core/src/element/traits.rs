@@ -1,14 +1,19 @@
+use crate::{Lifecycle, Styled};
+
 use super::node::ElementNode;
 
 /// A value that participates in an element tree.
 ///
-/// Custom elements implement this trait. Persistent stateful components instead implement
-/// [`crate::Render`] and produce an element tree from their signals.
-pub trait Element: Sized + 'static {
-    fn into_element_node(self) -> ElementNode;
+/// Every public UI value implements this trait. Its [`Lifecycle`](crate::Lifecycle) render observer
+/// owns reactive updates, while optional capabilities such as [`ParentElement`] remain separate.
+pub trait Element: Styled + Lifecycle + Sized + 'static {
+    #[doc(hidden)]
+    fn into_element_node(self) -> ElementNode {
+        ElementNode::lifecycle(self)
+    }
 }
 
-/// Conversion contract used by component render methods and parent builders.
+/// Conversion contract used by lifecycle render methods and parent builders.
 pub trait IntoElement: Sized {
     type Element: Element;
 

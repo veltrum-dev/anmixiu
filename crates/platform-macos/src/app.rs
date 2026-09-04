@@ -11,10 +11,10 @@ use std::{
 
 use anmixiu_core::GlobalElementId;
 use anmixiu_core::{
-    AppEvents, AppHandle, AppStateStore, CursorStyle, ErasedComponentHost, Eventful, Pixels,
-    PropertyUpdate, Render, SharedString, Typography, Window, WindowAction, WindowDispatcher,
-    WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot,
-    WindowSize, WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility,
+    AppEvents, AppHandle, AppStateStore, CursorStyle, Element, ErasedElementHost, Pixels,
+    PropertyUpdate, SharedString, Typography, Window, WindowAction, WindowDispatcher, WindowError,
+    WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot, WindowSize,
+    WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility,
 };
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
 use anmixiu_render_metal::{FrameOutcome, MetalRenderer, RenderError, SurfaceSize};
@@ -118,8 +118,8 @@ pub enum AppError {
     RenderLoop(usize),
     #[error("UI executor thread-affinity failure: {0}")]
     UiThread(String),
-    #[error("component render failed: {0}")]
-    Component(String),
+    #[error("Element lifecycle render failed: {0}")]
+    Element(String),
     #[error(transparent)]
     Window(#[from] WindowError),
 }
@@ -189,26 +189,11 @@ impl App {
 
     /// Starts `AppKit` and blocks until the last MVP window closes.
     ///
-    /// This path does not bind the optional [`Eventful`] capability. Components implementing it
-    /// must be launched with [`run_eventful`](Self::run_eventful).
-    ///
     /// # Errors
     ///
     /// Returns startup, rendering, or guarded render-loop failures.
-    pub fn run<C: Render>(self, root: C) -> Result<(), AppError> {
+    pub fn run<C: Element>(self, root: C) -> Result<(), AppError> {
         self.run_internal(WindowRoot::new(root))
-    }
-
-    /// Starts `AppKit` with the root Element's optional [`Eventful`] capability enabled.
-    ///
-    /// [`Eventful::bind_events`] is invoked once after the first frame is painted. The returned
-    /// subscriptions remain owned by the root Element and are removed when it unmounts.
-    ///
-    /// # Errors
-    ///
-    /// Returns startup, rendering, or guarded render-loop failures.
-    pub fn run_eventful<C: Render + Eventful>(self, root: C) -> Result<(), AppError> {
-        self.run_internal(WindowRoot::new_eventful(root))
     }
 
     fn run_internal(self, root: WindowRoot) -> Result<(), AppError> {
@@ -863,7 +848,7 @@ struct DriverState {
     runtime: Rc<AppRuntime>,
     owners: OwnerRegistry,
     owner: OwnerId,
-    host: Box<dyn ErasedComponentHost>,
+    host: Box<dyn ErasedElementHost>,
     #[cfg(debug_assertions)]
     root_type: &'static str,
     frame_builder: FrameBuilder,
@@ -1141,12 +1126,12 @@ impl NativeDriver for ComponentDriver {
                     state
                         .host
                         .render()
-                        .map_err(|error| AppError::Component(error.to_string()))?;
+                        .map_err(|error| AppError::Element(error.to_string()))?;
                 } else {
                     state
                         .host
                         .render_dirty(&renderable_dirty)
-                        .map_err(|error| AppError::Component(error.to_string()))?;
+                        .map_err(|error| AppError::Element(error.to_string()))?;
                 }
                 state.needs_frame = true;
             }

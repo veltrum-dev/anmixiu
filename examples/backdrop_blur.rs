@@ -3,18 +3,29 @@
 use anmixiu::prelude::*;
 
 struct BlurShowcase {
+    style: Style,
     enabled: Signal<bool>,
 }
 
 impl Default for BlurShowcase {
     fn default() -> Self {
         Self {
+            style: Style::default(),
             enabled: Signal::new(true),
         }
     }
 }
 
-impl Render for BlurShowcase {
+impl Styled for BlurShowcase {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for BlurShowcase {
     fn render(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let enabled = self.enabled.get();
         let toggle = self.enabled.clone();
@@ -69,6 +80,8 @@ impl Render for BlurShowcase {
             )
     }
 }
+
+impl Element for BlurShowcase {}
 
 fn main() -> Result<(), anmixiu::AppError> {
     tracing_subscriber::fmt()

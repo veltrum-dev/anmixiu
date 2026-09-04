@@ -7,13 +7,24 @@ struct Ping;
 
 #[derive(Default)]
 struct Counter {
+    style: Style,
     count: Signal<u32>,
     dispatch_order: Signal<String>,
     subscription_count: Signal<usize>,
     subscription_summary: Signal<String>,
 }
 
-impl Eventful for Counter {
+impl Styled for Counter {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for Counter {
     fn bind_events(&self, _cx: &mut Context<Self>, bindings: &mut EventBindings) {
         let order = self.dispatch_order.clone();
         bindings.subscribe::<Ping, _>(EventScope::Window, EventPriority::HIGH, move |_| {
@@ -47,9 +58,7 @@ impl Eventful for Counter {
             });
         });
     }
-}
 
-impl Render for Counter {
     fn on_mount(&self, cx: &mut Context<Self>) {
         let events = cx.event_context();
         self.subscription_count.set(events.subscription_count());
@@ -78,7 +87,7 @@ impl Render for Counter {
             .gap(px(16.0))
             .bg(Color::rgb(0.035, 0.05, 0.09))
             .text_color(Color::WHITE)
-            .child(text("Eventful Element example"))
+            .child(text("Lifecycle event example"))
             .child(text(shared_format!(
                 "Window subscriptions: {}",
                 self.subscription_count.get()
@@ -103,10 +112,12 @@ impl Render for Counter {
                     }),
             )
             .child(text(
-                "The same Eventful Element registered three listeners.",
+                "The same Element lifecycle registered three listeners.",
             ))
     }
 }
+
+impl Element for Counter {}
 
 fn main() -> Result<(), anmixiu::AppError> {
     tracing_subscriber::fmt()
@@ -115,8 +126,8 @@ fn main() -> Result<(), anmixiu::AppError> {
     App::new()
         .window(
             Window::new()
-                .title("Anmixiu Eventful Element")
+                .title("Anmixiu Lifecycle Events")
                 .size(620.0, 360.0),
         )
-        .run_eventful(Counter::default())
+        .run(Counter::default())
 }

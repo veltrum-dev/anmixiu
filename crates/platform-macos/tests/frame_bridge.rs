@@ -1,12 +1,64 @@
 #![cfg(target_os = "macos")]
 
+use std::rc::Rc;
+
 use anmixiu_core::{
-    AlignItems, Color, Element, GlobalElementId, InteractiveElement, ParentElement, ScrollHandle,
-    StatefulInteractiveElement, Styled, button, div, px, text,
+    AlignItems, Color, Context, Element, ElementHost, GlobalElementId, InteractiveElement,
+    Lifecycle, ParentElement, ScrollHandle, StatefulInteractiveElement, Style, Styled, button, div,
+    px, text,
 };
 use anmixiu_platform_macos::FrameBuilder;
 use anmixiu_render_metal::{MetalRenderer, SurfaceSize};
 use anmixiu_scene::{DrawCommand, Point, Size};
+
+#[derive(Default)]
+struct FilteredElement {
+    style: Style,
+}
+
+impl Styled for FilteredElement {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for FilteredElement {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        text("filtered lifecycle child")
+    }
+}
+
+impl Element for FilteredElement {}
+
+struct FilteredRoot;
+
+impl Lifecycle for FilteredRoot {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        div().child(FilteredElement::default().filter_blur(6.0))
+    }
+}
+
+#[test]
+fn lifecycle_element_box_owns_its_filter_effect_and_rendered_content() {
+    let mut host = ElementHost::new(Rc::new(FilteredRoot), Context::testing());
+    let element = host.render().expect("lifecycle tree renders").clone();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(320.0, 120.0), 1.0)
+        .unwrap();
+
+    assert!(frame.scene.commands().iter().any(|command| {
+        matches!(
+            command,
+            DrawCommand::FilterBlur { commands, .. }
+                if commands.iter().any(|nested| matches!(nested, DrawCommand::Glyphs { .. }))
+        )
+    }));
+}
 
 #[test]
 fn element_tree_becomes_cached_layout_scene_text_and_hit_regions() {

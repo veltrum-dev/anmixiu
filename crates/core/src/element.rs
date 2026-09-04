@@ -1,6 +1,6 @@
 mod button;
-mod component;
 mod div;
+mod empty;
 mod fluent;
 mod id;
 mod interaction;
@@ -12,8 +12,8 @@ mod text;
 mod traits;
 
 pub use button::{ButtonElement, button};
-pub use component::{ComponentElement, component, eventful_component};
 pub use div::{DivElement, div};
+pub(crate) use empty::EmptyElement;
 pub use fluent::FluentBuilder;
 pub use id::{ElementId, GlobalElementId};
 pub use interaction::{

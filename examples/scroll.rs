@@ -9,10 +9,20 @@ const CONTENT_WIDTH: f32 = 1_520.0;
 
 #[derive(Default)]
 struct ScrollDemo {
+    style: Style,
     surface: ScrollHandle,
 }
 
-impl Render for ScrollDemo {
+impl Styled for ScrollDemo {
+    fn style(&mut self) -> &mut Style {
+        &mut self.style
+    }
+    fn style_ref(&self) -> &Style {
+        &self.style
+    }
+}
+
+impl Lifecycle for ScrollDemo {
     fn render(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let rows = (0..ROW_COUNT).map(|row| {
             div()
@@ -82,6 +92,8 @@ impl Render for ScrollDemo {
             )
     }
 }
+
+impl Element for ScrollDemo {}
 
 fn main() -> Result<(), anmixiu::AppError> {
     tracing_subscriber::fmt()

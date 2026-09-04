@@ -10,13 +10,13 @@ mod typography;
 mod window;
 
 pub use anmixiu_runtime::SpawnError;
-pub use component::{ComponentHost, Context, Eventful, Render, RenderError, RenderOnce};
+pub use component::{Context, ElementHost, Lifecycle, RenderError};
 pub use element::{
-    AlignItems, ButtonElement, ClickHandler, Color, ComponentElement, CursorStyle, DivElement,
-    Element, ElementId, ElementNode, FlexDirection, FluentBuilder, GlobalElementId, HoverHandler,
-    InteractiveElement, IntoClickHandler, IntoElement, IntoHoverHandler, JustifyContent,
-    ParentElement, Pixels, ScrollHandle, Stateful, StatefulInteractiveElement, Style,
-    StyleRefinement, Styled, TextElement, button, component, div, eventful_component, px, text,
+    AlignItems, ButtonElement, ClickHandler, Color, CursorStyle, DivElement, Element, ElementId,
+    ElementNode, FlexDirection, FluentBuilder, GlobalElementId, HoverHandler, InteractiveElement,
+    IntoClickHandler, IntoElement, IntoHoverHandler, JustifyContent, ParentElement, Pixels,
+    ScrollHandle, Stateful, StatefulInteractiveElement, Style, StyleRefinement, Styled,
+    TextElement, button, div, px, text,
 };
 pub use events::{
     AppEvents, EventBindings, EventContext, EventError, EventPriority, EventScope,
@@ -27,7 +27,7 @@ pub use shared_string::SharedString;
 pub use state::{AppStateStore, State, WindowStateStore};
 pub use typography::Typography;
 pub use window::{
-    AppHandle, ErasedComponentHost, MountedWindowRoot, PropertyUpdate, Window, WindowAction,
+    AppHandle, ErasedElementHost, MountedWindowRoot, PropertyUpdate, Window, WindowAction,
     WindowDispatcher, WindowError, WindowHandle, WindowInfo, WindowMode, WindowMountContext,
     WindowParts, WindowRoot, WindowSize, WindowStatus, WindowUpdate, WindowVisibility,
 };

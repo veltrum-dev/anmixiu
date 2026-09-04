@@ -1,20 +1,24 @@
 use std::rc::Rc;
 
-use crate::{SharedString, component::NestedComponentFactory};
+use crate::{
+    Lifecycle, SharedString,
+    component::{ElementLifecycleFactory, element_lifecycle_factory},
+};
 
 use super::{
     id::ElementId,
     interaction::{ClickHandler, HoverHandler},
-    style::{Style, StyleRefinement},
+    style::{Style, StyleRefinement, Styled},
     traits::Element,
 };
 
 #[derive(Clone, Debug)]
 pub(crate) enum ElementKind {
+    Empty,
     Div,
     Text(SharedString),
     Button(SharedString),
-    Component(Rc<dyn NestedComponentFactory>),
+    Lifecycle(Rc<dyn ElementLifecycleFactory>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -48,13 +52,24 @@ impl ElementNode {
         }
     }
 
+    pub(crate) fn lifecycle<E: super::Element>(element: E) -> Self {
+        let mut base = ElementBase {
+            style: element.style_ref().clone(),
+            ..ElementBase::default()
+        };
+        let factory = element_lifecycle_factory(std::rc::Rc::new(element));
+        base.id = None;
+        Self::new(ElementKind::Lifecycle(factory), base, Vec::new())
+    }
+
     #[must_use]
     pub const fn kind_name(&self) -> &'static str {
         match self.kind {
+            ElementKind::Empty => "empty",
             ElementKind::Div => "div",
             ElementKind::Text(_) => "text",
             ElementKind::Button(_) => "button",
-            ElementKind::Component(_) => "component",
+            ElementKind::Lifecycle(_) => "element",
         }
     }
 
@@ -62,7 +77,7 @@ impl ElementNode {
     pub fn text_content(&self) -> Option<&str> {
         match &self.kind {
             ElementKind::Text(value) | ElementKind::Button(value) => Some(value),
-            ElementKind::Div | ElementKind::Component(_) => None,
+            ElementKind::Empty | ElementKind::Div | ElementKind::Lifecycle(_) => None,
         }
     }
 
@@ -71,7 +86,7 @@ impl ElementNode {
     pub fn text_value(&self) -> Option<&SharedString> {
         match &self.kind {
             ElementKind::Text(value) | ElementKind::Button(value) => Some(value),
-            ElementKind::Div | ElementKind::Component(_) => None,
+            ElementKind::Empty | ElementKind::Div | ElementKind::Lifecycle(_) => None,
         }
     }
 
@@ -86,7 +101,7 @@ impl ElementNode {
         if let Some(handler) = self.base.click.as_mut() {
             handler.bind_owner(owner);
         }
-        if !matches!(self.kind, ElementKind::Component(_)) {
+        if !matches!(self.kind, ElementKind::Lifecycle(_)) {
             for child in &mut self.children {
                 child.assign_owner(owner);
             }
@@ -97,17 +112,26 @@ impl ElementNode {
         self.base.id.as_ref()
     }
 
-    pub(crate) fn component_factory(&self) -> Option<Rc<dyn NestedComponentFactory>> {
+    pub(crate) fn set_element_id(&mut self, id: ElementId) {
+        self.base.id = Some(id);
+    }
+
+    pub(crate) fn lifecycle_factory(&self) -> Option<Rc<dyn ElementLifecycleFactory>> {
         match &self.kind {
-            ElementKind::Component(factory) => Some(factory.clone()),
-            ElementKind::Div | ElementKind::Text(_) | ElementKind::Button(_) => None,
+            ElementKind::Lifecycle(factory) => Some(factory.clone()),
+            ElementKind::Empty
+            | ElementKind::Div
+            | ElementKind::Text(_)
+            | ElementKind::Button(_) => None,
         }
     }
 
-    pub(crate) fn set_component_child(&mut self, child: Self) {
-        debug_assert!(matches!(self.kind, ElementKind::Component(_)));
+    pub(crate) fn set_rendered_child(&mut self, child: Self) {
+        debug_assert!(matches!(self.kind, ElementKind::Lifecycle(_)));
         self.children.clear();
-        self.children.push(child);
+        if !matches!(child.kind, ElementKind::Empty) {
+            self.children.push(child);
+        }
     }
 
     pub(crate) fn child_nodes_mut(&mut self) -> &mut [Self] {
@@ -154,5 +178,17 @@ impl ElementNode {
 impl Element for ElementNode {
     fn into_element_node(self) -> ElementNode {
         self
+    }
+}
+
+impl Lifecycle for ElementNode {}
+
+impl Styled for ElementNode {
+    fn style(&mut self) -> &mut Style {
+        &mut self.base.style
+    }
+
+    fn style_ref(&self) -> &Style {
+        &self.base.style
     }
 }

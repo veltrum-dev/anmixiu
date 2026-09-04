@@ -1,6 +1,4 @@
-use anmixiu_core::{
-    AppEvents, AppStateStore, Eventful, Pixels, Render, SharedString, Typography, Window,
-};
+use anmixiu_core::{AppEvents, AppStateStore, Element, Pixels, SharedString, Typography, Window};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -77,18 +75,7 @@ impl App {
     /// # Errors
     ///
     /// Always returns [`AppError::UnsupportedPlatform`].
-    /// This path does not bind [`Eventful`]; use [`run_eventful`](Self::run_eventful) for an
-    /// eventful root component.
-    pub fn run<C: Render>(self, _root: C) -> Result<(), AppError> {
-        Err(AppError::UnsupportedPlatform)
-    }
-
-    /// Reports that the `AppKit` host is unavailable on this target.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`AppError::UnsupportedPlatform`].
-    pub fn run_eventful<C: Render + Eventful>(self, _root: C) -> Result<(), AppError> {
+    pub fn run<C: Element>(self, _root: C) -> Result<(), AppError> {
         Err(AppError::UnsupportedPlatform)
     }
 }

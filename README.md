@@ -122,19 +122,9 @@ cargo run --features tailwind --example backdrop_blur
 ```
 
 `div()`, `text()`, and `button()` return concrete `DivElement`, `TextElement`, and
-`ButtonElement` values. Custom element recipes implement `Element`; persistent stateful components
-implement `Render`. Style, children, identity, and stateful interaction are separate traits exposed
-through the prelude.
-
-Persistent components can also be nested. Keep the component in a stable `Rc` and give its boundary
-a semantic id; the child then owns its own Signal subscriptions, lifecycle, event bindings, and UI
-tasks, and can rerender without executing its parent again:
-
-```rust
-div().child(component(self.counter.clone()).id("counter"))
-```
-
-Use `eventful_component(...)` when the nested component implements `Eventful`.
+`ButtonElement` values. Every UI value implements `Element: Styled + Lifecycle`; custom child
+Elements receive their own retained mounted identity, render observer, and synchronous mount/unmount
+hooks. Parenting, identity, and stateful interaction remain separate optional capabilities.
 
 Built-in controls are usable by default. A button already has a visible neutral background,
 readable label, intrinsic content width, centered text, one-pixel border, hover feedback, pointer
@@ -159,12 +149,21 @@ App::new()
 If neither level sets a field, the native platform UI font and its default visible size are used.
 
 Window titles inherit the application name unless explicitly set. `Window` is the creation
-configuration, while components receive live `AppHandle` and `WindowHandle` values through their
-`Context`. `cx.window()` always identifies the window that owns that component;
+configuration, while Elements receive live `AppHandle` and `WindowHandle` values through their
+`Context`. `cx.window()` always identifies the window that owns that Element;
 `cx.app().active_window()` instead follows native focus.
 
 ```rust
-impl Render for Workspace {
+struct Workspace {
+    style: Style,
+}
+
+impl Styled for Workspace {
+    fn style(&mut self) -> &mut Style { &mut self.style }
+    fn style_ref(&self) -> &Style { &self.style }
+}
+
+impl Lifecycle for Workspace {
     fn render(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let app = cx.app();
         button("Open inspector")
@@ -179,6 +178,8 @@ impl Render for Workspace {
             })
     }
 }
+
+impl Element for Workspace {}
 ```
 
 `WindowHandle::info()` is a reactive snapshot containing the resolved title, logical content size,
@@ -219,15 +220,15 @@ Run the two-axis smooth-scroll demo (120 rows with a wide horizontal surface):
 cargo run --features tailwind --example scroll
 ```
 
-Run the typed `Eventful` capability demo. It shows three Window-scope subscriptions dispatched by
+Run the typed lifecycle-event demo. It shows three Window-scope subscriptions dispatched by
 priority (`high → normal → low`) and the live subscription count:
 
 ```sh
 cargo run --features tailwind --example event
 ```
 
-`Eventful` is an explicit root capability: launch an implementing component with
-`App::run_eventful`. Ordinary `App::run` does not inspect or bind optional traits.
+`Lifecycle::bind_events` runs once with the Element's mount and retains its subscriptions until
+unmount; ordinary `App::run` handles both eventful and non-eventful Elements.
 
 Run the multi-window example to open, update, inspect, focus, and close independently owned native
 windows:
