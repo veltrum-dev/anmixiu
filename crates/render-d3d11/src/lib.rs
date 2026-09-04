@@ -726,7 +726,7 @@ mod platform {
             // SAFETY: The source bitmap is unbound after EndDraw and remains live while the effect
             // graph is encoded.
             unsafe { effect.SetInput(0, source_bitmap, true) };
-            let prepared_effect = (|| -> Result<(ID2D1Image, D2D_RECT_F), RenderError> {
+            let prepared_effect = (|| -> Result<ID2D1Image, RenderError> {
                 // SAFETY: Property bytes contain exactly one native-endian f32.
                 unsafe {
                     effect.SetValue(
@@ -737,14 +737,9 @@ mod platform {
                 }
                 .map_err(graphics_error)?;
                 // SAFETY: The configured built-in effect retains its live scene input.
-                let output = unsafe { effect.GetOutput() }.map_err(graphics_error)?;
-                // SAFETY: Bounds are queried synchronously from the effect graph on its creating
-                // context. Gaussian soft borders can move the output origin into negative space.
-                let output_bounds =
-                    unsafe { self.context.GetImageLocalBounds(&output) }.map_err(graphics_error)?;
-                Ok((output, output_bounds))
+                unsafe { effect.GetOutput() }.map_err(graphics_error)
             })();
-            let (output, output_bounds) = match prepared_effect {
+            let output = match prepared_effect {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     // SAFETY: Clears the retained input before propagating setup failure.
@@ -752,11 +747,7 @@ mod platform {
                     return Err(error);
                 }
             };
-            let source = d2d_rect(plan.sample_bounds);
-            let target_offset = Vector2 {
-                X: output_bounds.left - source.left,
-                Y: output_bounds.top - source.top,
-            };
+            let (source, target_offset) = d2d_blur_sample_mapping(plan.sample_bounds);
             let clear = D2D1_COLOR_F::default();
             // SAFETY: Scratch and scene are distinct. Drawing is balanced before scratch is used as
             // an input when compositing back into the scene.
@@ -1398,6 +1389,14 @@ mod platform {
         }
     }
 
+    fn d2d_blur_sample_mapping(sample_bounds: Rect) -> (D2D_RECT_F, Vector2) {
+        let source = d2d_rect(sample_bounds);
+        // Direct2D maps the top-left of `imageRectangle` to `targetOffset`. The scratch bitmap
+        // stores only this sample, so that destination origin is always zero even when the effect
+        // output itself has negative soft-border bounds.
+        (source, Vector2 { X: 0.0, Y: 0.0 })
+    }
+
     const fn d2d_color(color: Color) -> D2D1_COLOR_F {
         D2D1_COLOR_F {
             r: color.r,
@@ -1415,6 +1414,26 @@ mod platform {
             M22: 1.0,
             M31: 0.0,
             M32: 0.0,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn non_origin_blur_sample_maps_to_the_scratch_origin() {
+            let sample_bounds = Rect::new(
+                anmixiu_scene::Point::new(40.0, 40.0),
+                anmixiu_scene::Size::new(640.0, 440.0),
+            );
+
+            let (source, target_offset) = d2d_blur_sample_mapping(sample_bounds);
+
+            assert_eq!(source.left.to_bits(), 40.0_f32.to_bits());
+            assert_eq!(source.top.to_bits(), 40.0_f32.to_bits());
+            assert_eq!(target_offset.X.to_bits(), 0.0_f32.to_bits());
+            assert_eq!(target_offset.Y.to_bits(), 0.0_f32.to_bits());
         }
     }
 }
