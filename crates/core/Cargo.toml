@@ -31,5 +31,9 @@ harness = false
 name = "allocation"
 harness = false
 
+[[bench]]
+name = "lifecycle"
+harness = false
+
 [lints]
 workspace = true
