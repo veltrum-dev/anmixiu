@@ -15,7 +15,7 @@ impl Render for MainWindow {
         let reset_window = current;
 
         div()
-            .padding(20)
+            .p(20)
             .gap(12)
             .child(text(shared_format!(
                 "Main {:?}: {} × {}, scale {:.2}",
@@ -76,7 +76,7 @@ impl Render for DetailWindow {
         let info = window.info();
 
         div()
-            .padding(20)
+            .p(20)
             .gap(12)
             .child(text(shared_format!("Detail window #{}", self.detail)))
             .child(text(shared_format!(

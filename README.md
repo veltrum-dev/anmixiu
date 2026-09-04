@@ -71,6 +71,24 @@ div().width(320.0).height(200).padding(16).rounded(8.0)
 readability. Future non-pixel units will use explicit constructors and will not change the meaning
 of bare numeric values.
 
+Enable the optional `tailwind` feature for method-name aliases over the same typed style API:
+
+```rust
+div()
+    .w(320)
+    .min_h(120)
+    .p(16)
+    .flex_col()
+    .items_center()
+    .justify_between()
+    .bg(0x12_34_56)
+    .text_color(Color::WHITE)
+    .border(1);
+```
+
+These aliases do not parse class strings or add a theme and spacing scale. The long-form builders
+remain available with and without the feature.
+
 Backdrop blur is a paint-only effect. Its Gaussian sigma is expressed in logical pixels and applies
 only to content already painted behind the element; the element's own background, border, text, and
 children remain sharp. A translucent fill is typically layered over the filtered backdrop:
@@ -100,7 +118,7 @@ efficient backdrop-filter usage.
 Run the interactive comparison example and toggle the effect on and off:
 
 ```sh
-cargo run --example backdrop_blur
+cargo run --features tailwind --example backdrop_blur
 ```
 
 `div()`, `text()`, and `button()` return concrete `DivElement`, `TextElement`, and
@@ -172,7 +190,7 @@ if let Err(error) = window.update(
 Run the native Counter on macOS or Windows:
 
 ```sh
-cargo run --example counter
+cargo run --features tailwind --example counter
 ```
 
 This exercises the first platform backend; additional desktop and mobile runners will be added as
@@ -181,20 +199,20 @@ their native integrations land.
 Run the Counter with Anmixiu Dev Tools discovery enabled:
 
 ```sh
-cargo run --features devtools --example counter
+cargo run --features devtools,tailwind --example counter
 ```
 
 Run the two-axis smooth-scroll demo (120 rows with a wide horizontal surface):
 
 ```sh
-cargo run --example scroll
+cargo run --features tailwind --example scroll
 ```
 
 Run the typed `Eventful` capability demo. It shows three Window-scope subscriptions dispatched by
 priority (`high → normal → low`) and the live subscription count:
 
 ```sh
-cargo run --example event
+cargo run --features tailwind --example event
 ```
 
 `Eventful` is an explicit root capability: launch an implementing component with
@@ -204,7 +222,7 @@ Run the multi-window example to open, update, inspect, focus, and close independ
 windows:
 
 ```sh
-cargo run --example multi_window
+cargo run --features tailwind --example multi_window
 ```
 
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad

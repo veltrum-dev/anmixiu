@@ -269,6 +269,13 @@ pub trait Styled: Sized {
     }
 
     #[must_use]
+    /// Sets the flex shrink factor.
+    fn flex_shrink(mut self, value: f32) -> Self {
+        self.style().flex_shrink = value;
+        self
+    }
+
+    #[must_use]
     fn align(mut self, value: AlignItems) -> Self {
         self.style().align_items = value;
         self
@@ -354,14 +361,219 @@ pub trait Styled: Sized {
 
     #[cfg(feature = "tailwind")]
     #[must_use]
+    /// Tailwind-style alias for [`width`](Self::width).
+    fn w(self, value: impl Into<Pixels>) -> Self {
+        self.width(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`height`](Self::height).
     fn h(self, value: impl Into<Pixels>) -> Self {
         self.height(value)
     }
 
     #[cfg(feature = "tailwind")]
     #[must_use]
-    fn w(self, value: impl Into<Pixels>) -> Self {
-        self.width(value)
+    /// Tailwind-style alias for [`min_width`](Self::min_width).
+    fn min_w(self, value: impl Into<Pixels>) -> Self {
+        self.min_width(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`min_height`](Self::min_height).
+    fn min_h(self, value: impl Into<Pixels>) -> Self {
+        self.min_height(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`max_width`](Self::max_width).
+    fn max_w(self, value: impl Into<Pixels>) -> Self {
+        self.max_width(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`max_height`](Self::max_height).
+    fn max_h(self, value: impl Into<Pixels>) -> Self {
+        self.max_height(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`padding`](Self::padding).
+    fn p(self, value: impl Into<Pixels>) -> Self {
+        self.padding(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`flex_column`](Self::flex_column).
+    fn flex_col(self) -> Self {
+        self.flex_column()
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`flex_grow`](Self::flex_grow).
+    fn grow(self, value: f32) -> Self {
+        self.flex_grow(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`flex_shrink`](Self::flex_shrink).
+    fn shrink(self, value: f32) -> Self {
+        self.flex_shrink(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`align`](Self::align).
+    fn items(self, value: AlignItems) -> Self {
+        self.align(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Aligns children to the start of the cross axis.
+    fn items_start(self) -> Self {
+        self.align(AlignItems::Start)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Stretches children across the cross axis.
+    fn items_stretch(self) -> Self {
+        self.align(AlignItems::Stretch)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Centers children on the cross axis.
+    fn items_center(self) -> Self {
+        self.align(AlignItems::Center)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Aligns children to the end of the cross axis.
+    fn items_end(self) -> Self {
+        self.align(AlignItems::End)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Aligns this flex item to the start of the cross axis.
+    fn self_start(self) -> Self {
+        self.align_self(AlignItems::Start)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Stretches this flex item across the cross axis.
+    fn self_stretch(self) -> Self {
+        self.align_self(AlignItems::Stretch)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Centers this flex item on the cross axis.
+    fn self_center(self) -> Self {
+        self.align_self(AlignItems::Center)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Aligns this flex item to the end of the cross axis.
+    fn self_end(self) -> Self {
+        self.align_self(AlignItems::End)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Packs children at the start of the main axis.
+    fn justify_start(self) -> Self {
+        self.justify(JustifyContent::Start)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Centers children on the main axis.
+    fn justify_center(self) -> Self {
+        self.justify(JustifyContent::Center)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Packs children at the end of the main axis.
+    fn justify_end(self) -> Self {
+        self.justify(JustifyContent::End)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Distributes children with equal space between adjacent items.
+    fn justify_between(self) -> Self {
+        self.justify(JustifyContent::SpaceBetween)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`background`](Self::background).
+    fn bg(self, value: impl Into<Color>) -> Self {
+        self.background(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`filter_blur`](Self::filter_blur).
+    fn blur(self, sigma: impl Into<Pixels>) -> Self {
+        self.filter_blur(sigma)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`foreground`](Self::foreground).
+    fn text_color(self, value: impl Into<Color>) -> Self {
+        self.foreground(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`border_width`](Self::border_width).
+    fn border(self, value: impl Into<Pixels>) -> Self {
+        self.border_width(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`focus_ring`](Self::focus_ring).
+    fn ring(self, color: impl Into<Color>, width: impl Into<Pixels>) -> Self {
+        self.focus_ring(color, width)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Uses the platform's default cursor.
+    fn cursor_default(self) -> Self {
+        self.cursor(CursorStyle::Default)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Uses a pointer cursor.
+    fn cursor_pointer(self) -> Self {
+        self.cursor(CursorStyle::Pointer)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Uses a text-selection cursor.
+    fn cursor_text(self) -> Self {
+        self.cursor(CursorStyle::Text)
     }
 }
 
@@ -392,6 +604,20 @@ impl StyleRefinement {
     pub fn border_color(mut self, value: impl Into<Color>) -> Self {
         self.border_color = Some(value.into());
         self
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`background`](Self::background).
+    pub fn bg(self, value: impl Into<Color>) -> Self {
+        self.background(value)
+    }
+
+    #[cfg(feature = "tailwind")]
+    #[must_use]
+    /// Tailwind-style alias for [`foreground`](Self::foreground).
+    pub fn text_color(self, value: impl Into<Color>) -> Self {
+        self.foreground(value)
     }
 
     #[doc(hidden)]

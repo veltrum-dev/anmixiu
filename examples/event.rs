@@ -74,10 +74,10 @@ impl Render for Counter {
         let order = self.dispatch_order.clone();
 
         div()
-            .padding(px(28.0))
+            .p(px(28.0))
             .gap(px(16.0))
-            .background(Color::rgb(0.035, 0.05, 0.09))
-            .foreground(Color::WHITE)
+            .bg(Color::rgb(0.035, 0.05, 0.09))
+            .text_color(Color::WHITE)
             .child(text("Eventful Element example"))
             .child(text(shared_format!(
                 "Window subscriptions: {}",
