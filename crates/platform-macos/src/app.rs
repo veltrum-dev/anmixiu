@@ -644,6 +644,7 @@ impl AppSession {
         let Some(entry) = entry else {
             return;
         };
+        entry.view.invalidate_display_link();
         entry.driver.shutdown();
         if let Some(error) = entry.driver.take_error() {
             self.record_error(error);
@@ -714,6 +715,7 @@ impl AppSession {
             .map(|(_, entry)| entry)
             .collect();
         for entry in entries {
+            entry.view.invalidate_display_link();
             entry.driver.shutdown();
             if let Some(error) = entry.driver.take_error() {
                 self.record_error(error);
@@ -1686,6 +1688,19 @@ impl AnmixiuView {
         };
         link.setPaused(false);
         true
+    }
+
+    /// Tears down the display link so closing a window does not leak the view.
+    ///
+    /// `CADisplayLink` retains its target (this view) and the main run loop retains the link, so
+    /// dropping the owning `WindowEntry` alone leaves the cycle `runloop -> link -> view -> link`
+    /// alive forever. `invalidate` removes the link from every run loop mode and releases the
+    /// target, which is the only way to break that cycle. Idempotent: a second call is a no-op
+    /// once the ivar has been cleared.
+    fn invalidate_display_link(&self) {
+        if let Some(link) = self.ivars().display_link.take() {
+            link.invalidate();
+        }
     }
 
     fn queue_display(&self) {

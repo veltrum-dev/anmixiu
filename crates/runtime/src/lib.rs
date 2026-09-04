@@ -531,7 +531,13 @@ impl Drop for UiExecutor {
         self.state.active.set(false);
         if thread::current().id() == self.ui_thread {
             self.state.cancel_all();
-            let _ = self.run_ready();
+            // We are provably on the UI thread here, so `run_ready` cannot report
+            // `WrongUiThread`; drain the cancelled runnables to run their drop glue and ignore
+            // only that impossible error rather than discarding the result blindly.
+            match self.run_ready() {
+                Ok(_) => {}
+                Err(error) => debug_assert!(false, "UI-thread drop drained off-thread: {error:?}"),
+            }
         }
     }
 }
@@ -557,6 +563,13 @@ where
         return Err(SpawnError::OwnerNotAlive);
     }
 
+    // Check the hard capacity before installing any owner binding. An empty binding adds no
+    // active tasks, so if the cap is already reached the spawn must fail without leaving a
+    // dangling cleanup and owner entry behind that would inflate `bound_owner_count`.
+    if state.tasks.borrow().active_task_count() >= MAX_UI_TASKS {
+        return Err(SpawnError::CapacityReached);
+    }
+
     let needs_binding = !state.tasks.borrow().owners.contains_key(&owner);
     if needs_binding {
         let weak_state = Rc::downgrade(state);
@@ -575,9 +588,6 @@ where
     }
 
     let mut registry = state.tasks.borrow_mut();
-    if registry.active_task_count() >= MAX_UI_TASKS {
-        return Err(SpawnError::CapacityReached);
-    }
     let task_id = UiTaskId(registry.next_task_id);
     registry.next_task_id = registry
         .next_task_id

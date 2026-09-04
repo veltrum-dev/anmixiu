@@ -318,6 +318,59 @@ fn expected_pixel_aligned_tops(value: &str, size: f32, ascent: f32, scale: f32) 
 }
 
 #[test]
+fn rasterized_glyphs_are_stored_upright_in_the_atlas() {
+    // "L" is vertically asymmetric: its ink concentrates in the bottom rows (the horizontal
+    // foot), while the upper rows hold only the thin stem. An upright top-down atlas must
+    // therefore carry more ink in the lower half of the glyph cell than the upper half. A
+    // double vertical flip mirrors the mask and inverts this relationship, so this assertion
+    // fails the moment the atlas stores glyphs upside-down.
+    let atlas_size = 256_u16;
+    let mut text = TextSystem::new(AtlasConfig::new(
+        u32::from(atlas_size),
+        u32::from(atlas_size),
+        128,
+    ))
+    .unwrap();
+    let shaped = text
+        .shape_scaled(
+            "L",
+            Point::default(),
+            &FontSpec::new("Helvetica", 48.0),
+            1.0,
+        )
+        .unwrap();
+    let upload = shaped.atlas_upload.unwrap();
+    let glyph = shaped
+        .glyphs
+        .first()
+        .expect("\"L\" shapes to a single glyph");
+
+    let x = normalized_to_texel(glyph.uv_bounds.origin.x, atlas_size);
+    let y = normalized_to_texel(glyph.uv_bounds.origin.y, atlas_size);
+    let width = normalized_to_texel(glyph.uv_bounds.size.width, atlas_size);
+    let height = normalized_to_texel(glyph.uv_bounds.size.height, atlas_size);
+
+    let ink_in_rows = |start: u32, end: u32| -> u64 {
+        let mut sum = 0_u64;
+        for row in start..end {
+            for column in x..x + width {
+                sum += u64::from(upload.pixels[(row * u32::from(atlas_size) + column) as usize]);
+            }
+        }
+        sum
+    };
+    let half = height / 2;
+    let top = ink_in_rows(y, y + half);
+    let bottom = ink_in_rows(y + half, y + height);
+
+    assert!(
+        bottom > top,
+        "\"L\" is bottom-heavy; an upright atlas must keep its foot in the lower rows \
+         (top ink {top}, bottom ink {bottom})"
+    );
+}
+
+#[test]
 fn glyph_uvs_include_a_transparent_safety_border_for_antialiasing() {
     let atlas_size = 256_u16;
     let mut text = TextSystem::new(AtlasConfig::new(

@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use anmixiu_reactive::OwnerRegistry;
-use anmixiu_runtime::{AppRuntime, UiTaskStats};
+use anmixiu_runtime::{AppRuntime, MAX_UI_TASKS, SpawnError, UiTaskStats};
 
 #[test]
 fn app_runtime_uses_two_worker_threads_for_ui_timer_and_io_work() {
@@ -144,6 +144,37 @@ fn spawning_for_an_unmounted_owner_is_rejected() {
         .spawn(&owners, owner, async {})
         .expect_err("dead owners cannot gain tasks");
     assert_eq!(error.to_string(), "UI task owner is no longer alive");
+}
+
+#[test]
+fn reaching_capacity_does_not_bind_a_brand_new_owner() {
+    // Regression: the capacity check must run before an owner's cleanup/binding is installed.
+    // Otherwise a first spawn that hits the hard cap leaves an empty binding behind and
+    // inflates `bound_owner_count` for an owner that owns no tasks.
+    let runtime = AppRuntime::new(|| {}).expect("runtime builds");
+    let owners = OwnerRegistry::new();
+    let saturating_owner = owners.create_owner();
+    for _ in 0..MAX_UI_TASKS {
+        runtime
+            .ui()
+            .spawn(&owners, saturating_owner, pending::<()>())
+            .expect("tasks spawn up to the hard capacity");
+    }
+    assert_eq!(runtime.ui().stats().active_task_count, MAX_UI_TASKS);
+    assert_eq!(runtime.ui().stats().bound_owner_count, 1);
+
+    let fresh_owner = owners.create_owner();
+    let error = runtime
+        .ui()
+        .spawn(&owners, fresh_owner, async {})
+        .expect_err("the hard capacity rejects further spawns");
+
+    assert_eq!(error, SpawnError::CapacityReached);
+    assert_eq!(
+        runtime.ui().stats().bound_owner_count,
+        1,
+        "a rejected first spawn must not leave an empty owner binding"
+    );
 }
 
 #[test]

@@ -199,9 +199,7 @@ impl ScrollHandle {
         self.inner.target_x.set(next_x);
         self.inner.target_y.set(next_y);
         if changed && notify {
-            self.inner
-                .paint_invalidation
-                .set(self.inner.paint_revision.get().wrapping_add(1));
+            self.notify_paint();
         }
         changed
     }
@@ -313,8 +311,21 @@ impl ScrollHandle {
         let revision = self.inner.paint_revision.get().wrapping_add(1);
         self.inner.paint_revision.set(revision);
         if notify {
-            self.inner.paint_invalidation.set(revision);
+            self.notify_paint();
         }
+    }
+
+    /// Wakes render observers subscribed through [`track_paint`](Self::track_paint).
+    ///
+    /// `paint_invalidation` is a standalone monotonic tick, not a mirror of `paint_revision`: its
+    /// numeric value is never read for meaning, only its *change* matters. Keeping it independent
+    /// means a smooth-scroll wake followed by the `advance` that first moves the offset are two
+    /// distinct values, so the second notification is not swallowed by `Signal::set`'s equal-value
+    /// skip.
+    fn notify_paint(&self) {
+        self.inner
+            .paint_invalidation
+            .set(self.inner.paint_invalidation.get().wrapping_add(1));
     }
 }
 
@@ -375,6 +386,43 @@ mod tests {
         assert!((handle.offset_x() - 120.0).abs() < 0.01);
         assert!((handle.offset_y() - 80.0).abs() < 0.01);
         assert!(!handle.is_animating());
+    }
+
+    #[test]
+    fn smooth_scroll_then_advance_dirties_the_owner_on_the_frame_the_offset_moves() {
+        // A render observer that reads paint invalidation must be re-dirtied both when a smooth
+        // scroll requests animation and when `advance` actually moves the offset. If the two
+        // share a paint token value, the second write is suppressed and the frame that first
+        // shows motion is never repainted.
+        use anmixiu_reactive::OwnerRegistry;
+
+        let registry = OwnerRegistry::new();
+        let owner = registry.create_owner();
+        let handle = ScrollHandle::new();
+        let render = || {
+            registry.observe(owner, || handle.track_paint());
+        };
+
+        render();
+        let _ = registry.take_dirty();
+
+        assert!(handle.scroll_by_smooth(0.0, 80.0, 0.0, 200.0));
+        assert_eq!(
+            registry.take_dirty(),
+            vec![owner],
+            "queuing a smooth-scroll target must wake the render observer"
+        );
+
+        render();
+        assert!(
+            handle.advance(1.0 / 60.0),
+            "the offset moves toward the target"
+        );
+        assert_eq!(
+            registry.take_dirty(),
+            vec![owner],
+            "the frame that first moves the offset must re-dirty the observer"
+        );
     }
 
     #[test]

@@ -450,9 +450,15 @@ mod platform {
             })
         }
 
-        fn needs_repack(&self, glyphs: &[RasterGlyph]) -> bool {
+        /// Decides whether the incoming glyphs force a full atlas repack.
+        ///
+        /// Callers must pass a set already deduplicated by [`GlyphKey`]. Counting raw glyph
+        /// *occurrences* here would inflate both the capacity comparison and the shelf
+        /// reservation in [`Self::can_pack`], so a label with repeated new characters (e.g.
+        /// "bb") near capacity would trigger a spurious repack that discards still-live cached
+        /// glyphs and re-rasterizes them.
+        fn needs_repack<'a>(&self, glyphs: impl Iterator<Item = &'a RasterGlyph>) -> bool {
             let missing = glyphs
-                .iter()
                 .filter(|glyph| !self.entries.contains_key(&glyph.key))
                 .collect::<Vec<_>>();
             self.entries.len() + missing.len() > self.config.max_entries
@@ -964,7 +970,7 @@ mod platform {
                     capacity: self.atlas.config.max_entries,
                 });
             }
-            if self.atlas.needs_repack(&raster_glyphs) {
+            if self.atlas.needs_repack(unique_glyphs.iter().copied()) {
                 self.atlas.clear_for_repack();
             }
             if !self.atlas.can_pack(unique_glyphs.iter().copied()) {
@@ -1079,7 +1085,7 @@ mod platform {
                 let glyph_index = glyph;
                 let glyph_advance = advance;
                 let glyph_offset = offset;
-                let native_run = DWRITE_GLYPH_RUN {
+                let mut native_run = DWRITE_GLYPH_RUN {
                     fontFace: ManuallyDrop::new(Some(run.font_face.clone())),
                     fontEmSize: run.font_em_size,
                     glyphCount: 1,
@@ -1103,8 +1109,14 @@ mod platform {
                         baseline_x,
                         baseline_y,
                     )
-                }
-                .map_err(directwrite_error)?;
+                };
+                // SAFETY: `DWRITE_GLYPH_RUN` is an ABI struct without `Drop`, so the font-face
+                // clone moved into its `ManuallyDrop` field is never released otherwise. The
+                // analysis has already taken its own reference above, so releasing ours here
+                // balances the `clone`. This runs on every path, including the error return
+                // below, so a failed call cannot leak the reference either.
+                unsafe { ManuallyDrop::drop(&mut native_run.fontFace) };
+                let analysis = analysis.map_err(directwrite_error)?;
                 // SAFETY: The analysis object is live and returns a value RECT.
                 let bounds = unsafe { analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }
                     .map_err(directwrite_error)?;

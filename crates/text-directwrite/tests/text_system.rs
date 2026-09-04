@@ -175,6 +175,37 @@ fn atlas_repack_is_bounded_and_stable_after_warmup() {
 }
 
 #[test]
+fn repeated_new_glyphs_near_capacity_do_not_force_a_repack() {
+    // Regression: `needs_repack` must count unique glyph keys, not raw occurrences. With three
+    // of four slots filled, shaping "DD" adds a single new glyph but two occurrences. Counting
+    // occurrences yields 3 + 2 > 4 and wrongly clears the live A/B/C entries; counting unique
+    // keys yields 3 + 1 == 4 and leaves the atlas intact.
+    let mut text = TextSystem::new(AtlasConfig::new(128, 128, 4)).unwrap();
+    let font = FontSpec::system_ui(16.0);
+    text.shape("ABC", Point::default(), &font).unwrap();
+    assert_eq!(text.atlas_len(), 3);
+    assert_eq!(text.atlas_repacks(), 0);
+    let rasterized_after_abc = text.rasterized_glyph_count();
+
+    text.shape("DD", Point::default(), &font).unwrap();
+
+    assert_eq!(
+        text.atlas_repacks(),
+        0,
+        "one new glyph must not repack the atlas"
+    );
+    assert_eq!(text.atlas_len(), 4);
+    // A, B and C survived, so re-shaping them rasterizes nothing new.
+    assert!(
+        text.shape("ABC", Point::default(), &font)
+            .unwrap()
+            .atlas_upload
+            .is_none()
+    );
+    assert_eq!(text.rasterized_glyph_count(), rasterized_after_abc + 1);
+}
+
+#[test]
 fn fractional_positions_select_distinct_masks_with_pixel_aligned_quads() {
     let mut text = TextSystem::new(AtlasConfig::new(128, 128, 32)).unwrap();
     let font = FontSpec::system_ui(18.0);
