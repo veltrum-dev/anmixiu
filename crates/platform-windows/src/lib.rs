@@ -2,6 +2,8 @@
 #![cfg_attr(target_os = "windows", allow(unsafe_code))]
 
 pub use anmixiu_core::Window;
+#[doc(hidden)]
+pub use anmixiu_platform_native::InvalidationGuard;
 pub use anmixiu_platform_native::{
     BuiltFrame, DisplayCoordinator, FrameBuildError, FrameBuilder, PointerPhase, PointerTracker,
     Viewport,

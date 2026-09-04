@@ -38,7 +38,9 @@ use objc2_foundation::{
 use objc2_quartz_core::CADisplayLink;
 use thiserror::Error;
 
-use crate::{BuiltFrame, FrameBuildError, FrameBuilder, PointerTracker, Viewport};
+use crate::{
+    BuiltFrame, FrameBuildError, FrameBuilder, InvalidationGuard, PointerTracker, Viewport,
+};
 
 #[cfg(feature = "devtools")]
 use crate::{DevToolsAgent, devtools::DevToolsCommand};
@@ -861,7 +863,7 @@ struct DriverState {
     pressed_element: Option<GlobalElementId>,
     needs_frame: bool,
     drawable_retry_armed: bool,
-    invalidation_streak: usize,
+    invalidation_guard: InvalidationGuard,
     stalled: HashSet<OwnerId>,
     #[cfg(debug_assertions)]
     animation_frame_streak: u64,
@@ -951,7 +953,7 @@ impl ComponentDriver {
                 pressed_element: None,
                 needs_frame: true,
                 drawable_retry_armed: false,
-                invalidation_streak: 0,
+                invalidation_guard: InvalidationGuard::default(),
                 stalled: HashSet::new(),
                 #[cfg(debug_assertions)]
                 animation_frame_streak: 0,
@@ -1111,7 +1113,7 @@ impl NativeDriver for ComponentDriver {
             if !state.stalled.is_empty() {
                 for owner in &dirty {
                     if state.stalled.remove(owner) {
-                        state.invalidation_streak = 0;
+                        state.invalidation_guard.reset(*owner);
                     }
                 }
             }
@@ -1199,34 +1201,40 @@ impl NativeDriver for ComponentDriver {
             #[cfg(debug_assertions)]
             Self::warn_on_runaway_animation(&mut state, &animating_sites);
 
-            match evaluate_runaway_guard(
-                &mut state.invalidation_streak,
-                !self_invalidators.is_empty(),
-            ) {
-                GuardDecision::Settled | GuardDecision::Watching => {}
-                GuardDecision::Tripped => {
-                    // Debug builds fail fast so the offending component is caught during
-                    // development. Release builds keep the app alive: freeze just these owners and
-                    // drop their pending frames so they stop driving redraws, and log loudly. A
-                    // later external event (click/timer) re-dirties the owner via `take_dirty` at
-                    // the top of `draw`, which un-stalls it and lets it recover.
-                    #[cfg(debug_assertions)]
-                    return Err(AppError::RenderLoop(state.invalidation_streak));
-                    #[cfg(not(debug_assertions))]
-                    {
-                        let streak = state.invalidation_streak;
-                        for owner in &self_invalidators {
-                            let _ = state.owners.clear_dirty(*owner);
-                            state.stalled.insert(*owner);
-                        }
-                        tracing::error!(
-                            streak,
-                            frozen_owners = self_invalidators.len(),
-                            "component invalidated itself every frame without requesting an \
-                             animation frame; freezing it to stop a render loop"
-                        );
-                        state.invalidation_streak = 0;
+            let runaway = state
+                .invalidation_guard
+                .advance(&self_invalidators, MAX_RENDER_INVALIDATIONS);
+            if !runaway.is_empty() {
+                // Debug builds fail fast so the offending component is caught during development.
+                // Release builds keep the app alive: freeze only owners that reached their own
+                // limit and drop their pending frames. A later external event un-stalls and resets
+                // that owner at the top of `draw`.
+                #[cfg(debug_assertions)]
+                return Err(AppError::RenderLoop(
+                    runaway
+                        .iter()
+                        .map(|invalidation| invalidation.streak)
+                        .max()
+                        .unwrap_or(MAX_RENDER_INVALIDATIONS),
+                ));
+                #[cfg(not(debug_assertions))]
+                {
+                    let streak = runaway
+                        .iter()
+                        .map(|invalidation| invalidation.streak)
+                        .max()
+                        .unwrap_or(MAX_RENDER_INVALIDATIONS);
+                    for invalidation in &runaway {
+                        let _ = state.owners.clear_dirty(invalidation.owner);
+                        state.stalled.insert(invalidation.owner);
+                        state.invalidation_guard.reset(invalidation.owner);
                     }
+                    tracing::error!(
+                        streak,
+                        frozen_owners = runaway.len(),
+                        "component invalidated itself every frame without requesting an animation \
+                         frame; freezing it to stop a render loop"
+                    );
                 }
             }
             Ok(())
@@ -1776,32 +1784,6 @@ fn anonymous_self_invalidators(dirty: &[OwnerId], animating: &[OwnerId]) -> Vec<
         .collect()
 }
 
-/// Outcome of one turn of the render-loop guard.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GuardDecision {
-    /// No anonymous self-invalidation this turn; the streak was reset.
-    Settled,
-    /// Self-invalidation occurred but the streak is still under the limit.
-    Watching,
-    /// The streak reached the limit; the caller must fail (debug) or freeze (release).
-    Tripped,
-}
-
-/// Advances `streak` for this turn and decides whether the runaway guard trips. Pure so the
-/// branching (reset / advance / trip at the limit) is unit-testable without a GPU or `AppKit`.
-fn evaluate_runaway_guard(streak: &mut usize, has_self_invalidation: bool) -> GuardDecision {
-    if !has_self_invalidation {
-        *streak = 0;
-        return GuardDecision::Settled;
-    }
-    *streak = streak.saturating_add(1);
-    if *streak >= MAX_RENDER_INVALIDATIONS {
-        GuardDecision::Tripped
-    } else {
-        GuardDecision::Watching
-    }
-}
-
 fn viewport_for_view(view: &NSView) -> Viewport {
     let logical = view.bounds().size;
     let backing = view.convertSizeToBacking(logical);
@@ -1969,9 +1951,10 @@ fn with_app_session(operation: impl FnOnce(&AppSession)) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GuardDecision, MAX_RENDER_INVALIDATIONS, anonymous_self_invalidators,
-        drain_reentrant_queue, evaluate_runaway_guard, take_drawable_retry_slot,
+        MAX_RENDER_INVALIDATIONS, anonymous_self_invalidators, drain_reentrant_queue,
+        take_drawable_retry_slot,
     };
+    use crate::InvalidationGuard;
     use anmixiu_reactive::OwnerRegistry;
     use std::{cell::RefCell, collections::VecDeque};
 
@@ -2036,50 +2019,21 @@ mod tests {
     }
 
     #[test]
-    fn guard_resets_when_no_self_invalidation() {
-        let mut streak = 5;
-        assert_eq!(
-            evaluate_runaway_guard(&mut streak, false),
-            GuardDecision::Settled
-        );
-        assert_eq!(streak, 0);
-    }
+    fn alternating_owners_do_not_share_one_invalidation_streak() {
+        let owners = OwnerRegistry::new();
+        let first = owners.create_owner();
+        let second = owners.create_owner();
+        let mut guard = InvalidationGuard::default();
 
-    #[test]
-    fn guard_trips_only_after_the_consecutive_limit() {
-        let mut streak = 0;
-        // The first MAX-1 self-invalidating turns are watched, not tripped.
-        for _ in 0..MAX_RENDER_INVALIDATIONS - 1 {
-            assert_eq!(
-                evaluate_runaway_guard(&mut streak, true),
-                GuardDecision::Watching
+        for owner in [first, second]
+            .into_iter()
+            .cycle()
+            .take(MAX_RENDER_INVALIDATIONS)
+        {
+            assert!(
+                guard.advance(&[owner], MAX_RENDER_INVALIDATIONS).is_empty(),
+                "independent owners must not accumulate one shared streak"
             );
         }
-        // The MAX-th consecutive turn trips the guard.
-        assert_eq!(
-            evaluate_runaway_guard(&mut streak, true),
-            GuardDecision::Tripped
-        );
-        assert_eq!(streak, MAX_RENDER_INVALIDATIONS);
-    }
-
-    #[test]
-    fn a_settled_turn_between_self_invalidations_prevents_tripping() {
-        let mut streak = 0;
-        for _ in 0..MAX_RENDER_INVALIDATIONS - 1 {
-            assert_eq!(
-                evaluate_runaway_guard(&mut streak, true),
-                GuardDecision::Watching
-            );
-        }
-        // One clean turn resets the streak, so the loop must build up all over again.
-        assert_eq!(
-            evaluate_runaway_guard(&mut streak, false),
-            GuardDecision::Settled
-        );
-        assert_eq!(
-            evaluate_runaway_guard(&mut streak, true),
-            GuardDecision::Watching
-        );
     }
 }

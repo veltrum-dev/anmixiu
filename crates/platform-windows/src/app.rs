@@ -58,7 +58,9 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::{BuiltFrame, FrameBuildError, FrameBuilder, PointerTracker, Viewport};
+use crate::{
+    BuiltFrame, FrameBuildError, FrameBuilder, InvalidationGuard, PointerTracker, Viewport,
+};
 
 const MAX_RENDER_INVALIDATIONS: usize = 8;
 const FRAME_TIMER_ID: usize = 0xA11;
@@ -888,7 +890,7 @@ struct DriverState {
     pointer: PointerTracker,
     pressed_element: Option<GlobalElementId>,
     needs_frame: bool,
-    invalidation_streak: usize,
+    invalidation_guard: InvalidationGuard,
     stalled: HashSet<OwnerId>,
     last_draw_at: Option<Instant>,
     error: Option<AppError>,
@@ -936,7 +938,7 @@ impl ComponentDriver {
                 pointer: PointerTracker::default(),
                 pressed_element: None,
                 needs_frame: true,
-                invalidation_streak: 0,
+                invalidation_guard: InvalidationGuard::default(),
                 stalled: HashSet::new(),
                 last_draw_at: None,
                 error: None,
@@ -1025,7 +1027,7 @@ impl NativeDriver for ComponentDriver {
             let dirty = state.owners.take_dirty();
             for owner in &dirty {
                 if state.stalled.remove(owner) {
-                    state.invalidation_streak = 0;
+                    state.invalidation_guard.reset(*owner);
                 }
             }
             let renderable_dirty = dirty
@@ -1095,31 +1097,34 @@ impl NativeDriver for ComponentDriver {
                 .collect::<Vec<_>>();
             let self_invalidators =
                 anonymous_self_invalidators(&state.owners.dirty_snapshot(), &animating);
-            match evaluate_runaway_guard(
-                &mut state.invalidation_streak,
-                !self_invalidators.is_empty(),
-            ) {
-                GuardDecision::Settled | GuardDecision::Watching => {}
-                GuardDecision::Tripped => {
-                    #[cfg(debug_assertions)]
-                    return Err(AppError::RenderLoop(state.invalidation_streak));
-                    #[cfg(not(debug_assertions))]
-                    {
-                        for owner in &self_invalidators {
-                            if !state.owners.clear_dirty(*owner) {
-                                tracing::warn!(
-                                    ?owner,
-                                    "runaway owner was already absent from the dirty queue"
-                                );
-                            }
-                            state.stalled.insert(*owner);
+            let runaway = state
+                .invalidation_guard
+                .advance(&self_invalidators, MAX_RENDER_INVALIDATIONS);
+            if !runaway.is_empty() {
+                #[cfg(debug_assertions)]
+                return Err(AppError::RenderLoop(
+                    runaway
+                        .iter()
+                        .map(|invalidation| invalidation.streak)
+                        .max()
+                        .unwrap_or(MAX_RENDER_INVALIDATIONS),
+                ));
+                #[cfg(not(debug_assertions))]
+                {
+                    for invalidation in &runaway {
+                        if !state.owners.clear_dirty(invalidation.owner) {
+                            tracing::warn!(
+                                owner = ?invalidation.owner,
+                                "runaway owner was already absent from the dirty queue"
+                            );
                         }
-                        tracing::error!(
-                            frozen_owners = self_invalidators.len(),
-                            "component invalidated itself every frame without declaring animation"
-                        );
-                        state.invalidation_streak = 0;
+                        state.stalled.insert(invalidation.owner);
+                        state.invalidation_guard.reset(invalidation.owner);
                     }
+                    tracing::error!(
+                        frozen_owners = runaway.len(),
+                        "component invalidated itself every frame without declaring animation"
+                    );
                 }
             }
             if !animating.is_empty() || state.owners.dirty_len() != 0 {
@@ -1792,32 +1797,10 @@ fn anonymous_self_invalidators(dirty: &[OwnerId], animating: &[OwnerId]) -> Vec<
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GuardDecision {
-    Settled,
-    Watching,
-    Tripped,
-}
-
-fn evaluate_runaway_guard(streak: &mut usize, has_self_invalidation: bool) -> GuardDecision {
-    if !has_self_invalidation {
-        *streak = 0;
-        return GuardDecision::Settled;
-    }
-    *streak = streak.saturating_add(1);
-    if *streak >= MAX_RENDER_INVALIDATIONS {
-        GuardDecision::Tripped
-    } else {
-        GuardDecision::Watching
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        GuardDecision, MAX_RENDER_INVALIDATIONS, anonymous_self_invalidators,
-        evaluate_runaway_guard, high_word, low_word, signed_high, signed_low,
-    };
+    use super::{anonymous_self_invalidators, high_word, low_word, signed_high, signed_low};
+    use crate::InvalidationGuard;
     use anmixiu_reactive::OwnerRegistry;
 
     #[test]
@@ -1834,11 +1817,7 @@ mod tests {
         let owners = OwnerRegistry::new();
         let owner = owners.create_owner();
         assert!(anonymous_self_invalidators(&[owner], &[owner]).is_empty());
-        let mut streak = MAX_RENDER_INVALIDATIONS - 1;
-        assert_eq!(
-            evaluate_runaway_guard(&mut streak, false),
-            GuardDecision::Settled
-        );
-        assert_eq!(streak, 0);
+        let mut guard = InvalidationGuard::default();
+        assert!(guard.advance(&[], 8).is_empty());
     }
 }
