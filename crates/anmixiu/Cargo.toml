@@ -35,27 +35,32 @@ tracing-subscriber.workspace = true
 [[example]]
 name = "counter"
 path = "../../examples/counter.rs"
-required-features = ["tailwind"]
 
 [[example]]
 name = "scroll"
 path = "../../examples/scroll.rs"
-required-features = ["tailwind"]
 
 [[example]]
 name = "event"
 path = "../../examples/event.rs"
-required-features = ["tailwind"]
 
 [[example]]
 name = "multi_window"
 path = "../../examples/multi_window.rs"
-required-features = ["tailwind"]
 
 [[example]]
 name = "backdrop_blur"
 path = "../../examples/backdrop_blur.rs"
+
+[[example]]
+name = "tailwind"
+path = "../../examples/tailwind.rs"
 required-features = ["tailwind"]
+
+[[example]]
+name = "custom_element"
+path = "../../examples/custom_element.rs"
+required-features = ["macros"]
 
 [lints]
 workspace = true

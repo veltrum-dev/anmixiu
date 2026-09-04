@@ -25,7 +25,7 @@ impl Lifecycle for MainWindow {
         let reset_window = current;
 
         div()
-            .p(20)
+            .padding(20)
             .gap(12)
             .child(text(shared_format!(
                 "Main {:?}: {} × {}, scale {:.2}",
@@ -101,7 +101,7 @@ impl Lifecycle for DetailWindow {
         let info = window.info();
 
         div()
-            .p(20)
+            .padding(20)
             .gap(12)
             .child(text(shared_format!("Detail window #{}", self.detail)))
             .child(text(shared_format!(

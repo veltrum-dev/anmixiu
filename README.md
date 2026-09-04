@@ -140,7 +140,7 @@ efficient backdrop-filter usage.
 Run the interactive comparison example and toggle the effect on and off:
 
 ```sh
-cargo run --features tailwind --example backdrop_blur
+cargo run --example backdrop_blur
 ```
 
 `div()`, `text()`, and `button()` return concrete `DivElement`, `TextElement`, and
@@ -224,7 +224,7 @@ if let Err(error) = window.update(
 Run the native Counter on macOS or Windows:
 
 ```sh
-cargo run --features tailwind --example counter
+cargo run --example counter
 ```
 
 This selects the native macOS or Windows backend at compile time; additional desktop and mobile
@@ -233,30 +233,42 @@ runners will be added as their native integrations land.
 Run the Counter with Anmixiu Dev Tools discovery enabled:
 
 ```sh
-cargo run --features devtools,tailwind --example counter
+cargo run --features devtools --example counter
 ```
 
 Run the two-axis smooth-scroll demo (120 rows with a wide horizontal surface):
 
 ```sh
-cargo run --features tailwind --example scroll
+cargo run --example scroll
 ```
 
 Run the typed lifecycle-event demo. It shows three Window-scope subscriptions dispatched by
 priority (`high → normal → low`) and the live subscription count:
 
 ```sh
-cargo run --features tailwind --example event
+cargo run --example event
 ```
 
 `Lifecycle::bind_events` runs once with the Element's mount and retains its subscriptions until
 unmount; ordinary `App::run` handles both eventful and non-eventful Elements.
 
+Run the dedicated Tailwind-style alias example:
+
+```sh
+cargo run --features tailwind --example tailwind
+```
+
+Run the custom Element and derive-macro example:
+
+```sh
+cargo run --features macros --example custom_element
+```
+
 Run the multi-window example to open, update, inspect, focus, and close independently owned native
 windows:
 
 ```sh
-cargo run --features tailwind --example multi_window
+cargo run --example multi_window
 ```
 
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad

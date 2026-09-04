@@ -83,10 +83,10 @@ impl Lifecycle for Counter {
         let order = self.dispatch_order.clone();
 
         div()
-            .p(px(28.0))
+            .padding(px(28.0))
             .gap(px(16.0))
-            .bg(Color::rgb(0.035, 0.05, 0.09))
-            .text_color(Color::WHITE)
+            .background(Color::rgb(0.035, 0.05, 0.09))
+            .foreground(Color::WHITE)
             .child(text("Lifecycle event example"))
             .child(text(shared_format!(
                 "Window subscriptions: {}",

@@ -27,12 +27,12 @@ impl Lifecycle for ScrollDemo {
         let rows = (0..ROW_COUNT).map(|row| {
             div()
                 .flex_row()
-                .w(CONTENT_WIDTH)
-                .min_w(CONTENT_WIDTH)
-                .h(px(42.0))
+                .width(CONTENT_WIDTH)
+                .min_width(CONTENT_WIDTH)
+                .height(px(42.0))
                 .gap(px(16.0))
-                .p(px(10.0))
-                .bg(if row % 2 == 0 {
+                .padding(px(10.0))
+                .background(if row % 2 == 0 {
                     Color::rgb(0.08, 0.11, 0.18)
                 } else {
                     Color::rgb(0.06, 0.09, 0.15)
@@ -40,8 +40,8 @@ impl Lifecycle for ScrollDemo {
                 .rounded(px(8.0))
                 .child(
                     text(shared_format!("第 {:03} 行", row + 1))
-                        .w(px(112.0))
-                        .text_color(Color::rgb(0.64, 0.78, 1.0)),
+                        .width(px(112.0))
+                        .foreground(Color::rgb(0.64, 0.78, 1.0)),
                 )
                 .child(
                     text(shared_format!(
@@ -49,8 +49,8 @@ impl Lifecycle for ScrollDemo {
                         row + 1,
                         8 + (row * 7) % 43
                     ))
-                    .w(px(920.0))
-                    .text_color(Color::rgb(0.84, 0.88, 0.95)),
+                    .width(px(920.0))
+                    .foreground(Color::rgb(0.84, 0.88, 0.95)),
                 )
                 .child(
                     text(shared_format!(
@@ -61,32 +61,32 @@ impl Lifecycle for ScrollDemo {
                             "已完成"
                         }
                     ))
-                    .w(px(180.0))
-                    .text_color(Color::rgb(0.58, 0.86, 0.7)),
+                    .width(px(180.0))
+                    .foreground(Color::rgb(0.58, 0.86, 0.7)),
                 )
         });
 
         div()
-            .p(px(24.0))
+            .padding(px(24.0))
             .gap(px(14.0))
-            .bg(Color::rgb(0.025, 0.035, 0.065))
-            .text_color(Color::rgb(0.9, 0.93, 1.0))
-            .child(text("双轴滚动示例").text_color(Color::rgb(0.65, 0.8, 1.0)))
+            .background(Color::rgb(0.025, 0.035, 0.065))
+            .foreground(Color::rgb(0.9, 0.93, 1.0))
+            .child(text("双轴滚动示例").foreground(Color::rgb(0.65, 0.8, 1.0)))
             .child(text("滚轮/触控板可纵向滚动；触控板横向手势可查看右侧字段。滚动过程按显示器刷新率平滑追踪。"))
             .child(
                 div()
                     // Keep a real viewport so the long list overflows instead of making the
                     // container grow to its full content height.
-                    .h(px(500.0))
+                    .height(px(500.0))
                     .scroll(&self.surface)
-                    .bg(Color::rgb(0.045, 0.06, 0.1))
+                    .background(Color::rgb(0.045, 0.06, 0.1))
                     .rounded(px(12.0))
                     .child(
                         div()
-                            .w(CONTENT_WIDTH)
-                            .min_w(CONTENT_WIDTH)
+                            .width(CONTENT_WIDTH)
+                            .min_width(CONTENT_WIDTH)
                             .gap(px(8.0))
-                            .p(px(14.0))
+                            .padding(px(14.0))
                             .children(rows),
                     ),
             )
