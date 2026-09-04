@@ -27,10 +27,10 @@ unsafe Rust.
 
 Within an explicit component render observer, reading a `Signal` records one owner/source edge.
 A write mutates the value and inserts each live dependent owner into a deduplicated dirty queue; it
-never renders inline. The window requests one display turn. That turn removes redundant descendants
-when an already-dirty ancestor covers them, rerenders only remaining owners, and reuses layout and
-scene cache entries whose complete revision keys still match. A clean turn submits no GPU work, and
-a normal display turn presents at most one scene snapshot. Invalidations raised during render are moved
+never renders inline. The window requests one display turn. The retained component host rerenders
+only matching dirty owners and reuses every clean component snapshot, then layout and scene caches
+reuse entries whose complete revision keys still match. A clean turn submits no GPU work, and a
+normal display turn presents at most one scene snapshot. Invalidations raised during render are moved
 to the next turn and guarded against an infinite render loop.
 
 Unmount removes dependency edges and cancels unfinished owner-bound UI futures. Application and
@@ -80,6 +80,13 @@ concrete `DivElement`, `TextElement`, and `ButtonElement` values. `Styled`, `Par
 `InteractiveElement`, and `StatefulInteractiveElement` isolate style, tree, identity, and handler
 capabilities. The heterogeneous `ElementNode` projection is doc-hidden and exists only because a
 single child vector must hold different concrete element types across crate boundaries.
+
+`component(stable_rc).id(...)` inserts a transparent persistent component boundary. Its semantic
+path retains one typed `ComponentHost`, independent reactive owner, lifecycle, event bindings, and
+owner-bound tasks across parent renders. `eventful_component` opts the nested host into `Eventful`.
+Dirty child owners rebuild only their retained subtree snapshot; removing or replacing the keyed
+boundary synchronously unmounts that host. Async element handlers carry the producing component's
+owner through the frame projection so their futures are cancelled with the correct subtree.
 
 Built-ins have minimal usable defaults rather than being aliases for a generic node. `DivElement`
 defaults to a neutral Flex column container, `TextElement` inherits foreground and uses native text
@@ -156,7 +163,8 @@ Each application owns one Tokio multithread runtime for timers and I/O readiness
 bounded `async-task` queue and are polled only by the active platform's native UI thread: AppKit's
 main thread on macOS and the HWND-owning thread on Windows. Future backends provide an equivalent
 native UI executor without changing the owner contract. `Context::spawn` binds a future to the
-current persistent component owner, so callers do not retain or detach a task handle. The Tokio
+current persistent component owner and returns a structured `SpawnError`, so callers do not retain
+or detach a task handle and capacity/lifecycle rejection never becomes a framework panic. The Tokio
 runtime uses two workers: enough to remain multithreaded when one I/O task is delayed, without
 scaling idle UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
 
@@ -166,7 +174,10 @@ scaling idle UI thread count to every logical CPU. Lifecycle methods and render 
   one current entry per engine.
 - Scene: keyed by node, paint/layout revisions, and scale; bounded LRU capacity.
 - Glyph atlas: keyed by font identity, size, scale, glyph, and quantized subpixel phase;
-  fixed page dimensions and entry capacity, with generation changes forcing texture refresh.
+  fixed page dimensions and entry capacity, with generation changes forcing texture refresh. A
+  frame that observes a repack is rebuilt from a single atlas generation; a frame whose glyph union
+  cannot stabilize within the bounded page returns a structured error instead of submitting stale
+  UVs.
 - Renderer resources: Metal retains bounded pipelines, atlas textures, and staging buffers; D3D11
   retains a hard-capacity LRU of Direct2D A8 atlas bitmaps keyed by atlas id and generation.
 
@@ -245,11 +256,12 @@ unbinds the old Direct2D target before resizing the DXGI buffers and rebuilding 
 target. Stale physical size or scale is reported as `SurfaceOutOfDate` instead of presenting a
 scene against mismatched coordinates.
 
-Windows frame requests are deduplicated through private window messages and a single armed frame
-timer. UI-runtime wakes, component invalidations, hover changes, scroll animation, resize, and
-paint exposure all converge on that path. Pointer coordinates are converted from physical client
-pixels to logical pixels; button capture preserves down/up delivery, and wheel messages preserve
-signed coordinates on monitors with negative desktop origins.
+Windows UI-runtime wakes use thread messages whose lifetime is independent of any individual HWND.
+Per-window frame requests are deduplicated through private window messages and a single armed frame
+timer. Component invalidations, hover changes, scroll animation, resize, and paint exposure all
+converge on that path. Pointer coordinates are converted from physical client pixels to logical
+pixels; button capture preserves down/up delivery, and wheel messages preserve signed coordinates
+on monitors with negative desktop origins.
 
 DirectWrite shapes complete text layouts so script fallback, bidirectional ordering, and glyph
 advances are supplied by the native engine. Per-run font-file identity, face index, simulation,

@@ -76,6 +76,7 @@ impl DivElement {
     /// there is a viewport to scroll within.
     #[must_use]
     pub fn scroll(mut self, handle: &crate::ScrollHandle) -> Self {
+        handle.track_paint();
         self.base.scroll = Some(handle.clone());
         self
     }

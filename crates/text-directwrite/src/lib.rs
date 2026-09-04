@@ -825,6 +825,12 @@ mod platform {
             self.atlas.repacks
         }
 
+        #[doc(hidden)]
+        #[must_use]
+        pub fn atlas_upload_snapshot(&self) -> AtlasUpload {
+            self.atlas.upload()
+        }
+
         #[must_use]
         pub const fn rasterized_glyph_count(&self) -> u64 {
             self.rasterized_glyphs

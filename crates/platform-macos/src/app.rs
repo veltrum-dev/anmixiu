@@ -1130,14 +1130,24 @@ impl NativeDriver for ComponentDriver {
                     }
                 }
             }
-            let owner_stalled = state.stalled.contains(&state.owner);
-            let rerender =
-                !owner_stalled && (state.frame.is_none() || dirty.contains(&state.owner));
+            let renderable_dirty = dirty
+                .iter()
+                .copied()
+                .filter(|owner| !state.stalled.contains(owner) && state.host.contains_owner(*owner))
+                .collect::<Vec<_>>();
+            let rerender = state.frame.is_none() || !renderable_dirty.is_empty();
             if rerender {
-                state
-                    .host
-                    .render()
-                    .map_err(|error| AppError::Component(error.to_string()))?;
+                if state.frame.is_none() {
+                    state
+                        .host
+                        .render()
+                        .map_err(|error| AppError::Component(error.to_string()))?;
+                } else {
+                    state
+                        .host
+                        .render_dirty(&renderable_dirty)
+                        .map_err(|error| AppError::Component(error.to_string()))?;
+                }
                 state.needs_frame = true;
             }
             if !state.needs_frame {
@@ -1389,9 +1399,11 @@ impl NativeDriver for ComponentDriver {
         if let Some(handler) = handler
             && let Some(future) = handler.invoke()
         {
-            let owner = state.owner;
+            let owner = clicked
+                .and_then(|hit| state.frame.as_ref()?.handler_owner(hit))
+                .unwrap_or(state.owner);
             if let Err(error) = state.runtime.ui().spawn(&state.owners, owner, future) {
-                panic!("async click handler could not be scheduled: {error}");
+                tracing::error!(%error, ?owner, "async click handler could not be scheduled");
             }
         }
         let dirty = state.owners.dirty_len() != 0;

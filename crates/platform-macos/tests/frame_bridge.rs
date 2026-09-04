@@ -798,6 +798,128 @@ fn scroll_container_supports_smooth_two_axis_offsets_and_publishes_metrics() {
 }
 
 #[test]
+fn programmatic_scroll_offsets_invalidate_the_cached_scene() {
+    let handle = ScrollHandle::new();
+    let element = div()
+        .width(px(120.0))
+        .height(px(80.0))
+        .scroll(&handle)
+        .child(
+            div()
+                .height(px(240.0))
+                .min_height(px(240.0))
+                .child(text("programmatic")),
+        )
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let before = builder
+        .build(&element, Size::new(120.0, 80.0), 1.0)
+        .unwrap();
+    let before_y = before
+        .scene
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Glyphs { glyphs, .. } => glyphs.first().map(|glyph| glyph.bounds.origin.y),
+            _ => None,
+        })
+        .expect("text glyph");
+
+    handle.set_offset_y(40.0);
+    let after = builder
+        .build(&element, Size::new(120.0, 80.0), 1.0)
+        .unwrap();
+    let after_y = after
+        .scene
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Glyphs { glyphs, .. } => glyphs.first().map(|glyph| glyph.bounds.origin.y),
+            _ => None,
+        })
+        .expect("text glyph");
+    assert!((after_y - (before_y - 40.0)).abs() < 0.01);
+}
+
+#[test]
+fn nested_scroll_descendants_keep_every_ancestor_clip_and_rounding() {
+    let outer = ScrollHandle::new();
+    let inner = ScrollHandle::new();
+    let element = div()
+        .width(px(100.0))
+        .height(px(100.0))
+        .rounded(px(18.0))
+        .scroll(&outer)
+        .child(
+            div()
+                .width(px(160.0))
+                .height(px(160.0))
+                .min_width(px(160.0))
+                .min_height(px(160.0))
+                .scroll(&inner)
+                .child(
+                    button("nested")
+                        .width(px(160.0))
+                        .height(px(160.0))
+                        .min_width(px(160.0))
+                        .min_height(px(160.0))
+                        .id("nested-button")
+                        .on_click(|| {}),
+                ),
+        )
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(100.0, 100.0), 1.0)
+        .unwrap();
+    let hit = frame
+        .scene
+        .hit_regions()
+        .iter()
+        .find(|region| frame.global_id(region.id).is_some())
+        .expect("nested button hit region");
+    let clip = hit.clip.expect("scroll descendants are clipped");
+
+    assert_eq!(clip.bounds.size, Size::new(100.0, 100.0));
+    assert!((clip.corner_radius - 18.0).abs() < f32::EPSILON);
+    assert!(
+        !hit.contains(Point::new(1.0, 1.0)),
+        "rounded corner rejects hit"
+    );
+}
+
+#[test]
+fn small_descendant_at_a_scroll_corner_keeps_the_viewport_radius() {
+    let handle = ScrollHandle::new();
+    let element = div()
+        .width(px(100.0))
+        .height(px(100.0))
+        .rounded(px(24.0))
+        .scroll(&handle)
+        .child(
+            button("corner")
+                .width(px(32.0))
+                .height(px(32.0))
+                .id("corner-button")
+                .on_click(|| {}),
+        )
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(100.0, 100.0), 1.0)
+        .unwrap();
+    let hit = frame
+        .scene
+        .hit_regions()
+        .first()
+        .expect("button hit region");
+    let clip = hit.clip.expect("scroll clip");
+
+    assert!((clip.corner_radius - 24.0).abs() < f32::EPSILON);
+    assert!(!hit.contains(Point::new(1.0, 1.0)));
+}
+
+#[test]
 fn advance_scroll_steps_every_animating_region_in_one_frame() {
     // Two sibling scroll containers, both flung. `advance_scroll` must step BOTH each frame — a
     // short-circuiting `any` would freeze whichever region comes after the first still-animating

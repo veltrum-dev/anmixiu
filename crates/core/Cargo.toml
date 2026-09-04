@@ -24,10 +24,6 @@ criterion.workspace = true
 stats_alloc.workspace = true
 
 [[bench]]
-name = "frame_scheduler"
-harness = false
-
-[[bench]]
 name = "shared_string"
 harness = false
 

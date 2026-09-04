@@ -126,10 +126,21 @@ cargo run --features tailwind --example backdrop_blur
 implement `Render`. Style, children, identity, and stateful interaction are separate traits exposed
 through the prelude.
 
+Persistent components can also be nested. Keep the component in a stable `Rc` and give its boundary
+a semantic id; the child then owns its own Signal subscriptions, lifecycle, event bindings, and UI
+tasks, and can rerender without executing its parent again:
+
+```rust
+div().child(component(self.counter.clone()).id("counter"))
+```
+
+Use `eventful_component(...)` when the nested component implements `Eventful`.
+
 Built-in controls are usable by default. A button already has a visible neutral background,
 readable label, intrinsic content width, centered text, one-pixel border, hover feedback, pointer
-cursor, focus ring, padding, rounded corners, and a minimum hit-target height; apply `Styled` or
-`InteractiveElement::hover` only to override that baseline.
+cursor, focus-ring styling, padding, rounded corners, and a minimum hit-target height; apply
+`Styled` or `InteractiveElement::hover` only to override that baseline. Keyboard traversal and
+activation remain outside the current MVP input scope.
 
 Future reusable controls will be registered through an application-owned typed registry and will
 still compose ordinary Rust elements. Anmixiu will not use a global string-tag namespace or a
@@ -193,8 +204,8 @@ Run the native Counter on macOS or Windows:
 cargo run --features tailwind --example counter
 ```
 
-This exercises the first platform backend; additional desktop and mobile runners will be added as
-their native integrations land.
+This selects the native macOS or Windows backend at compile time; additional desktop and mobile
+runners will be added as their native integrations land.
 
 Run the Counter with Anmixiu Dev Tools discovery enabled:
 
@@ -226,8 +237,8 @@ cargo run --features tailwind --example multi_window
 ```
 
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad
-deltas into a target and follows it on the display link, while the scene paints an unobtrusive
-overlay scrollbar for each overflowing axis.
+deltas into a target and follows it on the display link. The handle publishes viewport and content
+metrics so applications can compose their own scrollbar; the framework does not paint one.
 
 For a browser-side baseline, open [browser-reference/index.html](browser-reference/index.html). It
 contains native HTML X/Y overflow, wheel/trackpad and scrollbar interactions, smooth programmatic

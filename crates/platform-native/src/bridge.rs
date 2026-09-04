@@ -7,14 +7,14 @@ use std::{
 
 use anmixiu_core::{
     AlignItems as CoreAlign, ClickHandler, Color as CoreColor, CursorStyle, ElementId, ElementNode,
-    FlexDirection as CoreDirection, GlobalElementId, HoverHandler, InteractiveElement,
-    JustifyContent as CoreJustify, ParentElement, Pixels as CorePixels, ScrollHandle, SharedString,
-    Style, StyleRefinement, Styled,
+    FlexDirection as CoreDirection, GlobalElementId, HoverHandler, JustifyContent as CoreJustify,
+    Pixels as CorePixels, ScrollHandle, SharedString, Style, StyleRefinement,
 };
 use anmixiu_layout_taffy::{
     Align, Dimension, Edges, FlexDirection, Justify, LayoutCacheStats, LayoutEngine, LayoutNode,
     LayoutNodeId, LayoutRequest, LayoutRevisions, LayoutStyle, LayoutTree, MeasureId, Viewport,
 };
+use anmixiu_reactive::OwnerId;
 use anmixiu_scene::{
     AtlasUpload, Clip, Color, DrawCommand, Glyph, HitId, HitRegion, Point, Rect, Scene, SceneCache,
     SceneCacheKey, SceneCacheStats, Size,
@@ -42,6 +42,7 @@ struct ProjectedNode {
     hoverable: bool,
     is_button: bool,
     scroll: Option<ScrollHandle>,
+    owner: Option<OwnerId>,
 }
 
 struct Projection {
@@ -52,6 +53,7 @@ struct Projection {
 
 struct FrameInteractions {
     handlers: HashMap<HitId, ClickHandler>,
+    handler_owners: HashMap<HitId, OwnerId>,
     element_ids: HashMap<HitId, GlobalElementId>,
     hover_handlers: HashMap<GlobalElementId, HoverHandler>,
     cursor_styles: HashMap<HitId, CursorStyle>,
@@ -90,13 +92,17 @@ pub enum FrameBuildError {
     Text(#[from] TextError),
     #[error("duplicate semantic element identity `{0}` in one rendered tree")]
     DuplicateElementId(GlobalElementId),
+    #[error("nested component boundary must contain exactly one rendered child")]
+    UnresolvedComponent,
+    #[error("text atlas changed during {attempts} consecutive attempts to build one frame")]
+    TextAtlasUnstable { attempts: usize },
 }
 
 /// A scroll container's viewport as painted this frame, with its handle and clamp range, so the
 /// platform can route a wheel gesture over the viewport to the right offset.
 #[derive(Clone, Debug)]
 struct ScrollRegion {
-    viewport: Rect,
+    viewport: Clip,
     handle: ScrollHandle,
     max_offset_x: f32,
     max_offset_y: f32,
@@ -107,6 +113,7 @@ pub struct BuiltFrame {
     pub layout: Arc<LayoutTree>,
     pub scene: Arc<Scene>,
     handlers: HashMap<HitId, ClickHandler>,
+    handler_owners: HashMap<HitId, OwnerId>,
     element_ids: HashMap<HitId, GlobalElementId>,
     hover_handlers: HashMap<GlobalElementId, HoverHandler>,
     cursor_styles: HashMap<HitId, CursorStyle>,
@@ -119,6 +126,11 @@ impl BuiltFrame {
     #[must_use]
     pub fn handler(&self, hit: HitId) -> Option<&ClickHandler> {
         self.handlers.get(&hit)
+    }
+
+    #[must_use]
+    pub fn handler_owner(&self, hit: HitId) -> Option<OwnerId> {
+        self.handler_owners.get(&hit).copied()
     }
 
     /// Returns the frontmost click-capable target at `point`.
@@ -160,7 +172,7 @@ impl BuiltFrame {
             return false;
         }
         let before = region.handle.offset_y();
-        let after = region.handle.scroll_by(delta_y, region.max_offset_y);
+        let after = region.handle.scroll_by_native(delta_y, region.max_offset_y);
         (after - before).abs() > f32::EPSILON
     }
 
@@ -183,9 +195,12 @@ impl BuiltFrame {
         if region.max_offset_x <= 0.0 && region.max_offset_y <= 0.0 {
             return false;
         }
-        region
-            .handle
-            .scroll_by_smooth(delta_x, delta_y, region.max_offset_x, region.max_offset_y)
+        region.handle.scroll_by_smooth_native(
+            delta_x,
+            delta_y,
+            region.max_offset_x,
+            region.max_offset_y,
+        )
     }
 
     /// Advances active scroll animations for one display-link interval.
@@ -201,7 +216,7 @@ impl BuiltFrame {
         // region and freeze the rest.
         let mut still_animating = false;
         for region in &self.scroll_regions {
-            if region.handle.advance(delta_seconds) {
+            if region.handle.advance_native(delta_seconds) {
                 still_animating = true;
             }
         }
@@ -315,6 +330,37 @@ impl FrameBuilder {
         viewport_size: Size,
         scale: f32,
     ) -> Result<BuiltFrame, FrameBuildError> {
+        const MAX_ATLAS_ATTEMPTS: usize = 3;
+        let mut force_atlas_upload = false;
+        for attempt in 1..=MAX_ATLAS_ATTEMPTS {
+            let repacks_before = self.text.atlas_repacks();
+            let frame = self.build_once(element, viewport_size, scale, force_atlas_upload)?;
+            if self.text.atlas_repacks() == repacks_before {
+                return Ok(frame);
+            }
+            self.shaped_text.clear();
+            self.positioned_text.clear();
+            self.scene.clear();
+            self.paint_generation = self.paint_generation.saturating_add(1);
+            force_atlas_upload = true;
+            if attempt == MAX_ATLAS_ATTEMPTS {
+                return Err(FrameBuildError::TextAtlasUnstable {
+                    attempts: MAX_ATLAS_ATTEMPTS,
+                });
+            }
+        }
+        Err(FrameBuildError::TextAtlasUnstable {
+            attempts: MAX_ATLAS_ATTEMPTS,
+        })
+    }
+
+    fn build_once(
+        &mut self,
+        element: &ElementNode,
+        viewport_size: Size,
+        scale: f32,
+        force_atlas_upload: bool,
+    ) -> Result<BuiltFrame, FrameBuildError> {
         let projection = project(element)?;
         self.advance_revisions(projection.fingerprints, viewport_size, scale);
 
@@ -351,6 +397,10 @@ impl FrameBuilder {
             self.layout_generation,
             scale,
         );
+
+        if force_atlas_upload {
+            latest_upload = Some(self.text.atlas_upload_snapshot());
+        }
 
         // Glyph masks depend on each glyph's final device-space position. Layout must therefore
         // finish before CoreText chooses a horizontal subpixel variant.
@@ -391,6 +441,7 @@ impl FrameBuilder {
             layout,
             scene,
             handlers: interactions.handlers,
+            handler_owners: interactions.handler_owners,
             element_ids: interactions.element_ids,
             hover_handlers: interactions.hover_handlers,
             cursor_styles: interactions.cursor_styles,
@@ -827,6 +878,7 @@ fn project(element: &ElementNode) -> Result<Projection, FrameBuildError> {
 fn collect_interactions(nodes: Vec<ProjectedNode>) -> FrameInteractions {
     let mut interactions = FrameInteractions {
         handlers: HashMap::new(),
+        handler_owners: HashMap::new(),
         element_ids: HashMap::new(),
         hover_handlers: HashMap::new(),
         cursor_styles: HashMap::new(),
@@ -837,6 +889,9 @@ fn collect_interactions(nodes: Vec<ProjectedNode>) -> FrameInteractions {
         let hit = HitId(node.id.0);
         if let Some(handler) = node.handler {
             interactions.handlers.insert(hit, handler);
+            if let Some(owner) = node.owner {
+                interactions.handler_owners.insert(hit, owner);
+            }
         }
         if let Some(global_id) = node.global_id {
             if let Some(handler) = node.hover_handler {
@@ -868,6 +923,26 @@ fn project_node(
     path: &mut Vec<ElementId>,
     seen: &mut HashSet<GlobalElementId>,
 ) -> Result<LayoutNode, FrameBuildError> {
+    if element.kind_name() == "component" {
+        let Some(element_id) = element.element_id() else {
+            return Err(FrameBuildError::UnresolvedComponent);
+        };
+        let [child] = element.children_ref() else {
+            return Err(FrameBuildError::UnresolvedComponent);
+        };
+        path.push(element_id.clone());
+        let projected = project_node(
+            child,
+            inherited_foreground,
+            parent,
+            next_id,
+            nodes,
+            path,
+            seen,
+        );
+        path.pop();
+        return projected;
+    }
     let id = LayoutNodeId(*next_id);
     *next_id = next_id.saturating_add(1);
     let has_semantic_id = if let Some(element_id) = element.element_id() {
@@ -907,6 +982,7 @@ fn project_node(
     let hover_style = element.hover_style().cloned();
     let clickable = element.kind_name() == "button" || handler.is_some();
     let hoverable = hover_handler.is_some() || hover_style.is_some();
+    let owner = handler.as_ref().and_then(ClickHandler::owner_id);
     nodes.push(ProjectedNode {
         id,
         parent,
@@ -920,6 +996,7 @@ fn project_node(
         hoverable,
         is_button: element.kind_name() == "button",
         scroll: element.scroll_handle().cloned(),
+        owner,
     });
     if has_semantic_id {
         path.pop();
@@ -1050,7 +1127,7 @@ impl SceneEmitter<'_> {
         if let (Some(sigma), Some(filtered_commands)) = (sigma, filtered_commands) {
             commands.push(DrawCommand::FilterBlur {
                 sigma,
-                clip: scroll_clip.map(Clip::rectangular),
+                clip: scroll_clip,
                 commands: filtered_commands.into(),
             });
         }
@@ -1060,21 +1137,19 @@ impl SceneEmitter<'_> {
         &mut self,
         node: &ProjectedNode,
         bounds: Rect,
-        scroll_clip: Option<Rect>,
+        scroll_clip: Option<Clip>,
         paint_style: &Style,
         scroll_offset: Point,
         commands: &mut Vec<DrawCommand>,
     ) {
         let self_clip = Clip::rounded(bounds, paint_style.border_radius.value());
-        let clip = scroll_clip.map_or(self_clip, |viewport| {
-            Clip::rectangular(self_clip.bounds.intersection(viewport).unwrap_or(viewport))
-        });
+        let clip = combined_clip(self_clip, scroll_clip);
         if let Some(sigma) = backdrop_sigma(paint_style) {
             commands.push(DrawCommand::BackdropBlur {
                 bounds,
                 sigma,
                 corner_radius: paint_style.border_radius.value().max(0.0),
-                clip: scroll_clip.map(Clip::rectangular),
+                clip: scroll_clip,
             });
         }
         push_box_commands_clipped(commands, bounds, paint_style, scroll_clip);
@@ -1204,51 +1279,57 @@ fn push_debug_outline(commands: &mut Vec<DrawCommand>, bounds: Rect, color: Colo
     });
 }
 
-/// Accumulated scroll offset applied to a node from all its scroll-container ancestors,
-/// plus the clip rect of the nearest such ancestor (its unscrolled viewport bounds). A node with no
-/// scroll ancestor gets `(0.0, None)` and is painted unchanged.
+/// Accumulated scroll offset applied to a node from all its scroll-container ancestors, plus their
+/// intersected viewport clips. A node with no scroll ancestor gets `(0.0, None)` and is painted
+/// unchanged.
 fn scroll_transform(
     id: LayoutNodeId,
     by_id: &HashMap<LayoutNodeId, &ProjectedNode>,
     layout: &LayoutTree,
-) -> (f32, f32, Option<Rect>) {
-    let mut offset_x = 0.0;
-    let mut offset_y = 0.0;
-    let mut nearest_scroll: Option<(LayoutNodeId, f32, f32)> = None;
-    // Walk to the root through parents; a scroll container contributes its handle offset, and the
-    // nearest one's viewport bounds become the clip.
+) -> (f32, f32, Option<Clip>) {
+    let mut scroll_ancestors = Vec::new();
     let mut current = by_id.get(&id).and_then(|node| node.parent);
     while let Some(parent_id) = current {
         let Some(parent) = by_id.get(&parent_id) else {
             break;
         };
         if let Some(handle) = parent.scroll.as_ref() {
-            if nearest_scroll.is_none() {
-                nearest_scroll = Some((parent_id, handle.offset_x(), handle.offset_y()));
-            }
-            offset_x += handle.offset_x();
-            offset_y += handle.offset_y();
+            scroll_ancestors.push((
+                parent_id,
+                handle.offset_x(),
+                handle.offset_y(),
+                parent.style.border_radius.value().max(0.0),
+            ));
         }
         current = parent.parent;
     }
-    let clip = nearest_scroll
-        .as_ref()
-        .and_then(|(id, _, _)| layout.bounds(*id))
-        .map(|bounds| {
-            // A nested viewport moves with its scrolling ancestors, but not with its own handle.
-            // `offset_*` contains all ancestor handles, so subtract the nearest one's offset.
-            let (clip_offset_x, clip_offset_y) = nearest_scroll
-                .map_or((0.0, 0.0), |(_, nearest_x, nearest_y)| {
-                    (offset_x - nearest_x, offset_y - nearest_y)
-                });
+    let offset_x = scroll_ancestors.iter().map(|(_, x, _, _)| *x).sum();
+    let offset_y = scroll_ancestors.iter().map(|(_, _, y, _)| *y).sum();
+    let mut clip = None;
+    for (index, (ancestor, _, _, radius)) in scroll_ancestors.iter().enumerate() {
+        let outer_offset_x = scroll_ancestors[index + 1..]
+            .iter()
+            .map(|(_, x, _, _)| *x)
+            .sum::<f32>();
+        let outer_offset_y = scroll_ancestors[index + 1..]
+            .iter()
+            .map(|(_, _, y, _)| *y)
+            .sum::<f32>();
+        let Some(bounds) = layout.bounds(*ancestor) else {
+            continue;
+        };
+        let ancestor_clip = Clip::rounded(
             Rect::new(
                 Point::new(
-                    bounds.origin.x - clip_offset_x,
-                    bounds.origin.y - clip_offset_y,
+                    bounds.origin.x - outer_offset_x,
+                    bounds.origin.y - outer_offset_y,
                 ),
                 bounds.size,
-            )
-        });
+            ),
+            *radius,
+        );
+        clip = Some(combined_clip(ancestor_clip, clip));
+    }
     (offset_x, offset_y, clip)
 }
 
@@ -1278,11 +1359,10 @@ fn collect_scroll_regions(nodes: &[ProjectedNode], layout: &LayoutTree) -> Vec<S
                 ),
                 raw_viewport.size,
             );
-            let viewport = ancestor_clip.map_or(shifted_viewport, |clip| {
-                shifted_viewport
-                    .intersection(clip)
-                    .unwrap_or(Rect::new(shifted_viewport.origin, Size::default()))
-            });
+            let viewport = combined_clip(
+                Clip::rounded(shifted_viewport, node.style.border_radius.value().max(0.0)),
+                ancestor_clip,
+            );
             let content_size = scroll_content_size(node.id, &children, layout);
             // Publish the measured sizes so the application can draw its own scrollbar; the
             // framework no longer renders one. Deduplicated inside the handle.
@@ -1358,7 +1438,7 @@ fn push_box_commands_clipped(
     commands: &mut Vec<DrawCommand>,
     bounds: Rect,
     style: &Style,
-    clip: Option<Rect>,
+    clip: Option<Clip>,
 ) {
     let border_width = style
         .border_width
@@ -1400,12 +1480,11 @@ fn push_quad(
     bounds: Rect,
     color: Color,
     radius: f32,
-    clip: Option<Rect>,
+    clip: Option<Clip>,
 ) {
     if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
         return;
     }
-    let clip = clip.map(Clip::rectangular);
     if radius > 0.0 {
         commands.push(DrawCommand::RoundedQuad {
             bounds,
@@ -1420,6 +1499,46 @@ fn push_quad(
             clip,
         });
     }
+}
+
+fn combined_clip(clip: Clip, ancestor: Option<Clip>) -> Clip {
+    let Some(ancestor) = ancestor else {
+        return clip;
+    };
+    let Some(bounds) = clip.bounds.intersection(ancestor.bounds) else {
+        return Clip::rectangular(Rect::new(clip.bounds.origin, Size::default()));
+    };
+    if rect_is_inside_clip(bounds, ancestor) {
+        return clip;
+    }
+    if rect_is_inside_clip(bounds, clip) {
+        return ancestor;
+    }
+    // A single portable Clip cannot encode two partially intersecting rounded rectangles. Keep the
+    // strongest radius on their shared bounds. Ordinary contained scroll viewports remain exact;
+    // unusual partially overlapping rounded viewports use this bounded single-clip approximation.
+    Clip::rounded(bounds, clip.corner_radius.max(ancestor.corner_radius))
+}
+
+fn rect_is_inside_clip(bounds: Rect, clip: Clip) -> bool {
+    if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+        return false;
+    }
+    let inset = 0.001_f32
+        .min(bounds.size.width / 4.0)
+        .min(bounds.size.height / 4.0);
+    let min_x = bounds.min_x() + inset;
+    let min_y = bounds.min_y() + inset;
+    let max_x = bounds.max_x() - inset;
+    let max_y = bounds.max_y() - inset;
+    [
+        Point::new(min_x, min_y),
+        Point::new(max_x, min_y),
+        Point::new(min_x, max_y),
+        Point::new(max_x, max_y),
+    ]
+    .into_iter()
+    .all(|point| clip.contains(point))
 }
 
 fn inset_rect(bounds: Rect, inset: f32) -> Rect {
@@ -1477,6 +1596,10 @@ fn hash_element(
     hash_refinement(element.hover_style(), paint);
     element.click_handler().is_some().hash(paint);
     element.hover_handler().is_some().hash(paint);
+    element
+        .scroll_handle()
+        .map(ScrollHandle::paint_key)
+        .hash(paint);
     for child in element.children_ref() {
         hash_element(child, structure, style, measure, paint);
     }
@@ -1593,6 +1716,7 @@ fn hash_refinement(value: Option<&StyleRefinement>, paint: &mut DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anmixiu_core::{Element, ParentElement};
 
     #[test]
     fn positioned_text_cache_reuses_raster_for_integer_translation() {
@@ -1692,5 +1816,50 @@ mod tests {
             reshaped_upload.is_some(),
             "re-shaping the evicted string rebuilds it against the current atlas layout"
         );
+    }
+
+    #[test]
+    fn one_frame_never_keeps_glyph_uvs_from_before_an_atlas_repack() {
+        let mut builder = FrameBuilder::new_with_font(FontSpec::system_ui(16.0)).unwrap();
+        builder.text = TextSystem::new(AtlasConfig::new(128, 128, 4)).unwrap();
+        let tree = anmixiu_core::div()
+            .child(anmixiu_core::text("AB"))
+            .child(anmixiu_core::text("CDEF"))
+            .into_element_node();
+
+        let error = builder
+            .build(&tree, Size::new(320.0, 120.0), 1.0)
+            .expect_err("six frame glyphs cannot share a four-entry atlas");
+        assert!(matches!(
+            error,
+            FrameBuildError::TextAtlasUnstable { attempts: 3 }
+        ));
+    }
+
+    #[test]
+    fn frame_rebuilds_after_evicting_glyphs_used_only_by_an_older_frame() {
+        let mut builder = FrameBuilder::new_with_font(FontSpec::system_ui(16.0)).unwrap();
+        builder.text = TextSystem::new(AtlasConfig::new(128, 128, 6)).unwrap();
+        builder
+            .shape_cached(&SharedString::new_static("WXYZ"), 1.0)
+            .unwrap();
+        let tree = anmixiu_core::div()
+            .child(anmixiu_core::text("AB"))
+            .child(anmixiu_core::text("CD"))
+            .into_element_node();
+
+        let frame = builder
+            .build(&tree, Size::new(320.0, 120.0), 1.0)
+            .expect("current-frame glyph union fits after old glyphs are evicted");
+        assert_eq!(
+            frame
+                .scene
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Glyphs { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(frame.scene.atlas_uploads().len(), 1);
     }
 }

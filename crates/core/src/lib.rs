@@ -9,19 +9,20 @@ mod state;
 mod typography;
 mod window;
 
+pub use anmixiu_runtime::SpawnError;
 pub use component::{ComponentHost, Context, Eventful, Render, RenderError, RenderOnce};
 pub use element::{
-    AlignItems, ButtonElement, ClickHandler, Color, CursorStyle, DivElement, Element, ElementId,
-    ElementNode, FlexDirection, FluentBuilder, GlobalElementId, HitNode, HoverHandler,
-    InteractiveElement, IntoClickHandler, IntoElement, IntoHoverHandler, JustifyContent, NodeId,
+    AlignItems, ButtonElement, ClickHandler, Color, ComponentElement, CursorStyle, DivElement,
+    Element, ElementId, ElementNode, FlexDirection, FluentBuilder, GlobalElementId, HoverHandler,
+    InteractiveElement, IntoClickHandler, IntoElement, IntoHoverHandler, JustifyContent,
     ParentElement, Pixels, ScrollHandle, Stateful, StatefulInteractiveElement, Style,
-    StyleRefinement, Styled, TextElement, button, div, px, text,
+    StyleRefinement, Styled, TextElement, button, component, div, eventful_component, px, text,
 };
 pub use events::{
     AppEvents, EventBindings, EventContext, EventError, EventPriority, EventScope,
     EventSubscriptionInfo, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, Subscription,
 };
-pub use scheduler::{FrameBatcher, FrameLoopError, WindowId};
+pub use scheduler::WindowId;
 pub use shared_string::SharedString;
 pub use state::{AppStateStore, State, WindowStateStore};
 pub use typography::Typography;

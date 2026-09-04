@@ -1,4 +1,12 @@
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use anmixiu_reactive::Signal;
+
+static NEXT_SCROLL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Exponential approach rate used by platform scroll animations.
 ///
@@ -15,6 +23,14 @@ const SCROLL_SMOOTHING_RATE: f32 = 20.0;
 /// consistent with the rest of the signal model.
 #[derive(Clone, Debug)]
 pub struct ScrollHandle {
+    inner: Rc<ScrollState>,
+}
+
+#[derive(Debug)]
+struct ScrollState {
+    id: u64,
+    paint_revision: Cell<u64>,
+    paint_invalidation: Signal<u64>,
     offset_x: Signal<f32>,
     offset_y: Signal<f32>,
     target_x: Signal<f32>,
@@ -36,62 +52,89 @@ impl ScrollHandle {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            offset_x: Signal::new(0.0),
-            offset_y: Signal::new(0.0),
-            target_x: Signal::new(0.0),
-            target_y: Signal::new(0.0),
-            viewport_size: Signal::new((0.0, 0.0)),
-            content_size: Signal::new((0.0, 0.0)),
+            inner: Rc::new(ScrollState {
+                id: NEXT_SCROLL_ID.fetch_add(1, Ordering::Relaxed),
+                paint_revision: Cell::new(0),
+                paint_invalidation: Signal::new(0),
+                offset_x: Signal::new(0.0),
+                offset_y: Signal::new(0.0),
+                target_x: Signal::new(0.0),
+                target_y: Signal::new(0.0),
+                viewport_size: Signal::new((0.0, 0.0)),
+                content_size: Signal::new((0.0, 0.0)),
+            }),
         }
     }
 
     /// Current horizontal offset in logical pixels (content is shifted left by this much).
     #[must_use]
     pub fn offset_x(&self) -> f32 {
-        self.offset_x.get()
+        self.inner.offset_x.get()
     }
 
     /// Current vertical offset in logical pixels (content is shifted up by this much).
     #[must_use]
     pub fn offset_y(&self) -> f32 {
-        self.offset_y.get()
+        self.inner.offset_y.get()
     }
 
     /// Current target horizontal offset used by smooth scrolling.
     #[must_use]
     pub fn target_x(&self) -> f32 {
-        self.target_x.get()
+        self.inner.target_x.get()
     }
 
     /// Current target vertical offset used by smooth scrolling.
     #[must_use]
     pub fn target_y(&self) -> f32 {
-        self.target_y.get()
+        self.inner.target_y.get()
     }
 
     /// Sets the horizontal offset directly (clamped to be non-negative).
     pub fn set_offset_x(&self, value: f32) {
         let value = finite(value).max(0.0);
-        self.offset_x.set(value);
-        self.target_x.set(value);
+        let changed = (self.inner.offset_x.get() - value).abs() > f32::EPSILON;
+        self.inner.offset_x.set(value);
+        self.inner.target_x.set(value);
+        if changed {
+            self.bump_paint(true);
+        }
     }
 
     /// Sets the vertical offset directly (clamped to be non-negative). Marks subscribers dirty only
     /// when the value actually changes.
     pub fn set_offset_y(&self, value: f32) {
         let value = finite(value).max(0.0);
-        self.offset_y.set(value);
-        self.target_y.set(value);
+        let changed = (self.inner.offset_y.get() - value).abs() > f32::EPSILON;
+        self.inner.offset_y.set(value);
+        self.inner.target_y.set(value);
+        if changed {
+            self.bump_paint(true);
+        }
     }
 
     /// Applies a wheel delta against a known scrollable range, clamping to `0..=max_offset`.
     /// Returns the resulting offset. `max_offset` is `content_height - viewport_height`.
     #[must_use]
     pub fn scroll_by(&self, delta_y: f32, max_offset: f32) -> f32 {
+        self.scroll_by_y(delta_y, max_offset, true)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scroll_by_native(&self, delta_y: f32, max_offset: f32) -> f32 {
+        self.scroll_by_y(delta_y, max_offset, false)
+    }
+
+    fn scroll_by_y(&self, delta_y: f32, max_offset: f32, notify: bool) -> f32 {
         let max = finite(max_offset).max(0.0);
-        let next = (self.offset_y.get() + finite(delta_y)).clamp(0.0, max);
-        self.offset_y.set(next);
-        self.target_y.set(next);
+        let current = self.inner.offset_y.get();
+        let next = (current + finite(delta_y)).clamp(0.0, max);
+        self.inner.offset_y.set(next);
+        self.inner.target_y.set(next);
+        if (next - current).abs() > f32::EPSILON {
+            self.bump_paint(notify);
+        }
         next
     }
 
@@ -99,9 +142,13 @@ impl ScrollHandle {
     #[must_use]
     pub fn scroll_by_x(&self, delta_x: f32, max_offset: f32) -> f32 {
         let max = finite(max_offset).max(0.0);
-        let next = (self.offset_x.get() + finite(delta_x)).clamp(0.0, max);
-        self.offset_x.set(next);
-        self.target_x.set(next);
+        let current = self.inner.offset_x.get();
+        let next = (current + finite(delta_x)).clamp(0.0, max);
+        self.inner.offset_x.set(next);
+        self.inner.target_x.set(next);
+        if (next - current).abs() > f32::EPSILON {
+            self.bump_paint(true);
+        }
         next
     }
 
@@ -118,16 +165,44 @@ impl ScrollHandle {
         max_offset_x: f32,
         max_offset_y: f32,
     ) -> bool {
+        self.scroll_by_smooth_inner(delta_x, delta_y, max_offset_x, max_offset_y, true)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scroll_by_smooth_native(
+        &self,
+        delta_x: f32,
+        delta_y: f32,
+        max_offset_x: f32,
+        max_offset_y: f32,
+    ) -> bool {
+        self.scroll_by_smooth_inner(delta_x, delta_y, max_offset_x, max_offset_y, false)
+    }
+
+    fn scroll_by_smooth_inner(
+        &self,
+        delta_x: f32,
+        delta_y: f32,
+        max_offset_x: f32,
+        max_offset_y: f32,
+        notify: bool,
+    ) -> bool {
         let max_x = finite(max_offset_x).max(0.0);
         let max_y = finite(max_offset_y).max(0.0);
-        let target_x = self.target_x.get();
-        let target_y = self.target_y.get();
+        let target_x = self.inner.target_x.get();
+        let target_y = self.inner.target_y.get();
         let next_x = (target_x + finite(delta_x)).clamp(0.0, max_x);
         let next_y = (target_y + finite(delta_y)).clamp(0.0, max_y);
         let changed =
             (next_x - target_x).abs() > f32::EPSILON || (next_y - target_y).abs() > f32::EPSILON;
-        self.target_x.set(next_x);
-        self.target_y.set(next_y);
+        self.inner.target_x.set(next_x);
+        self.inner.target_y.set(next_y);
+        if changed && notify {
+            self.inner
+                .paint_invalidation
+                .set(self.inner.paint_revision.get().wrapping_add(1));
+        }
         changed
     }
 
@@ -138,10 +213,20 @@ impl ScrollHandle {
     /// data.
     #[must_use]
     pub fn advance(&self, delta_seconds: f32) -> bool {
-        let current_x = self.offset_x.get();
-        let current_y = self.offset_y.get();
-        let target_x = self.target_x.get();
-        let target_y = self.target_y.get();
+        self.advance_inner(delta_seconds, true)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn advance_native(&self, delta_seconds: f32) -> bool {
+        self.advance_inner(delta_seconds, false)
+    }
+
+    fn advance_inner(&self, delta_seconds: f32, notify: bool) -> bool {
+        let current_x = self.inner.offset_x.get();
+        let current_y = self.inner.offset_y.get();
+        let target_x = self.inner.target_x.get();
+        let target_y = self.inner.target_y.get();
         let alpha = if delta_seconds.is_finite() && delta_seconds > 0.0 {
             1.0 - (-SCROLL_SMOOTHING_RATE * delta_seconds).exp()
         } else {
@@ -159,16 +244,19 @@ impl ScrollHandle {
         };
         let changed =
             (next_x - current_x).abs() > f32::EPSILON || (next_y - current_y).abs() > f32::EPSILON;
-        self.offset_x.set(next_x);
-        self.offset_y.set(next_y);
+        self.inner.offset_x.set(next_x);
+        self.inner.offset_y.set(next_y);
+        if changed {
+            self.bump_paint(notify);
+        }
         changed || (target_x - next_x).abs() >= 0.01 || (target_y - next_y).abs() >= 0.01
     }
 
     /// Returns whether either axis is still moving toward its smooth-scroll target.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        (self.target_x.get() - self.offset_x.get()).abs() >= 0.01
-            || (self.target_y.get() - self.offset_y.get()).abs() >= 0.01
+        (self.inner.target_x.get() - self.inner.offset_x.get()).abs() >= 0.01
+            || (self.inner.target_y.get() - self.inner.offset_y.get()).abs() >= 0.01
     }
 
     /// Records the measured viewport and content sizes for this scroll container.
@@ -178,9 +266,11 @@ impl ScrollHandle {
     /// / [`content_size`](Self::content_size) to draw their own scrollbar — the framework does not
     /// render one.
     pub fn set_metrics(&self, viewport: (f32, f32), content: (f32, f32)) {
-        self.viewport_size
+        self.inner
+            .viewport_size
             .set((finite(viewport.0).max(0.0), finite(viewport.1).max(0.0)));
-        self.content_size
+        self.inner
+            .content_size
             .set((finite(content.0).max(0.0), finite(content.1).max(0.0)));
     }
 
@@ -188,25 +278,43 @@ impl ScrollHandle {
     /// first layout.
     #[must_use]
     pub fn viewport_size(&self) -> (f32, f32) {
-        self.viewport_size.get()
+        self.inner.viewport_size.get()
     }
 
     /// Measured content size `(width, height)` — the full extent of the scrolled content.
     #[must_use]
     pub fn content_size(&self) -> (f32, f32) {
-        self.content_size.get()
+        self.inner.content_size.get()
     }
 
     /// Maximum vertical offset (`content_height - viewport_height`, floored at 0).
     #[must_use]
     pub fn max_offset_y(&self) -> f32 {
-        (self.content_size.get().1 - self.viewport_size.get().1).max(0.0)
+        (self.inner.content_size.get().1 - self.inner.viewport_size.get().1).max(0.0)
     }
 
     /// Maximum horizontal offset (`content_width - viewport_width`, floored at 0).
     #[must_use]
     pub fn max_offset_x(&self) -> f32 {
-        (self.content_size.get().0 - self.viewport_size.get().0).max(0.0)
+        (self.inner.content_size.get().0 - self.inner.viewport_size.get().0).max(0.0)
+    }
+
+    pub(crate) fn track_paint(&self) {
+        let _revision = self.inner.paint_invalidation.get();
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn paint_key(&self) -> (u64, u64) {
+        (self.inner.id, self.inner.paint_revision.get())
+    }
+
+    fn bump_paint(&self, notify: bool) {
+        let revision = self.inner.paint_revision.get().wrapping_add(1);
+        self.inner.paint_revision.set(revision);
+        if notify {
+            self.inner.paint_invalidation.set(revision);
+        }
     }
 }
 

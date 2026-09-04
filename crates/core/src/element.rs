@@ -1,4 +1,5 @@
 mod button;
+mod component;
 mod div;
 mod fluent;
 mod id;
@@ -11,6 +12,7 @@ mod text;
 mod traits;
 
 pub use button::{ButtonElement, button};
+pub use component::{ComponentElement, component, eventful_component};
 pub use div::{DivElement, div};
 pub use fluent::FluentBuilder;
 pub use id::{ElementId, GlobalElementId};
@@ -19,7 +21,7 @@ pub use interaction::{
     StatefulInteractiveElement,
 };
 #[doc(hidden)]
-pub use node::{ElementNode, HitNode, NodeId};
+pub use node::ElementNode;
 pub use scroll::ScrollHandle;
 pub use stateful::Stateful;
 pub use style::{

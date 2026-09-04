@@ -7,10 +7,9 @@
 use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
-    ffi::c_void,
     mem::size_of,
     rc::{Rc, Weak},
-    sync::atomic::{AtomicIsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::Instant,
 };
 
@@ -34,7 +33,7 @@ use windows::{
             LRESULT, POINT, RECT, WPARAM,
         },
         Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient},
-        System::LibraryLoader::GetModuleHandleW,
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
         UI::{
             HiDpi::{
                 AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -47,9 +46,9 @@ use windows::{
                 CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, HTCLIENT, IDC_ARROW,
                 IDC_HAND, IDC_IBEAM, KillTimer, LoadCursorW, MSG, PostMessageW, PostQuitMessage,
-                RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_MAXIMIZE, SW_MINIMIZE,
-                SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
-                SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+                PostThreadMessageW, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_MAXIMIZE,
+                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+                SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
                 TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
                 WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
                 WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER,
@@ -70,25 +69,40 @@ const WM_ANMIXIU_REQUEST_FRAME: u32 = WM_APP + 2;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 const SHIFT_BUTTON_MASK: usize = 0x0004;
 
-static ACTIVE_HWND: AtomicIsize = AtomicIsize::new(0);
+static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     static ACTIVE_APP: RefCell<Option<Rc<AppSession>>> = const { RefCell::new(None) };
 }
 
-fn active_hwnd() -> Option<HWND> {
-    let raw = ACTIVE_HWND.load(Ordering::Acquire);
-    (raw != 0).then_some(HWND(raw as *mut c_void))
+fn wake_win32() {
+    let thread_id = UI_THREAD_ID.load(Ordering::Acquire);
+    if thread_id == 0 {
+        return;
+    }
+    // SAFETY: The id belongs to the application UI thread for the entire App::run call. A thread
+    // message is independent of individual HWND lifetimes, so closing one window cannot lose a
+    // runtime wake intended for another.
+    if let Err(error) =
+        unsafe { PostThreadMessageW(thread_id, WM_ANMIXIU_WAKE, WPARAM(0), LPARAM(0)) }
+    {
+        tracing::debug!(%error, "Win32 UI thread stopped accepting runtime wake messages");
+    }
 }
 
-fn wake_win32() {
-    let Some(hwnd) = active_hwnd() else {
-        return;
-    };
-    // SAFETY: `ACTIVE_HWND` is installed only while the window is live. PostMessageW is
-    // thread-safe and only queues work; all Rust state remains confined to the UI thread.
-    if let Err(error) = unsafe { PostMessageW(Some(hwnd), WM_ANMIXIU_WAKE, WPARAM(0), LPARAM(0)) } {
-        tracing::debug!(%error, "Win32 UI wake arrived after its window stopped accepting messages");
+struct UiThreadWakeRegistration;
+
+impl UiThreadWakeRegistration {
+    fn install() -> Self {
+        // SAFETY: Reads the numeric identity of the current application UI thread.
+        UI_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for UiThreadWakeRegistration {
+    fn drop(&mut self) {
+        UI_THREAD_ID.store(0, Ordering::Release);
     }
 }
 
@@ -214,6 +228,7 @@ impl App {
         {
             return Err(win32_error(error));
         }
+        let _wake_registration = UiThreadWakeRegistration::install();
         let session = Rc::new(AppSession::new(
             self.name,
             self.state,
@@ -230,7 +245,6 @@ impl App {
 
         let message_result = run_message_loop();
         session.shutdown();
-        ACTIVE_HWND.store(0, Ordering::Release);
         ACTIVE_APP.with(|active| {
             active.take();
         });
@@ -436,9 +450,6 @@ impl AppSession {
                 mouse_leave_tracked: Cell::new(false),
             },
         );
-        if ACTIVE_HWND.load(Ordering::Acquire) == 0 {
-            ACTIVE_HWND.store(hwnd.0 as isize, Ordering::Release);
-        }
         // SAFETY: The fully attached top-level HWND is ready to be shown.
         let _previously_visible = unsafe { ShowWindow(hwnd, SW_SHOW) };
         self.active_window.set(Some(id));
@@ -708,16 +719,7 @@ impl AppSession {
         if self.windows.borrow().is_empty() && !self.pending.borrow().is_empty() {
             self.drain_commands();
         }
-        let next_hwnd = self
-            .windows
-            .borrow()
-            .values()
-            .next()
-            .map(|entry| entry.hwnd);
-        if let Some(next_hwnd) = next_hwnd {
-            ACTIVE_HWND.store(next_hwnd.0 as isize, Ordering::Release);
-        } else {
-            ACTIVE_HWND.store(0, Ordering::Release);
+        if self.windows.borrow().is_empty() {
             // SAFETY: The last live top-level window on this UI thread has closed.
             unsafe { PostQuitMessage(0) };
         }
@@ -1041,13 +1043,24 @@ impl NativeDriver for ComponentDriver {
                     state.invalidation_streak = 0;
                 }
             }
-            let rerender = !state.stalled.contains(&state.owner)
-                && (state.frame.is_none() || dirty.contains(&state.owner));
+            let renderable_dirty = dirty
+                .iter()
+                .copied()
+                .filter(|owner| !state.stalled.contains(owner) && state.host.contains_owner(*owner))
+                .collect::<Vec<_>>();
+            let rerender = state.frame.is_none() || !renderable_dirty.is_empty();
             if rerender {
-                state
-                    .host
-                    .render()
-                    .map_err(|error| AppError::Component(error.to_string()))?;
+                if state.frame.is_none() {
+                    state
+                        .host
+                        .render()
+                        .map_err(|error| AppError::Component(error.to_string()))?;
+                } else {
+                    state
+                        .host
+                        .render_dirty(&renderable_dirty)
+                        .map_err(|error| AppError::Component(error.to_string()))?;
+                }
                 state.needs_frame = true;
             }
             if !state.needs_frame {
@@ -1283,9 +1296,11 @@ impl NativeDriver for ComponentDriver {
         if let Some(handler) = handler
             && let Some(future) = handler.invoke()
         {
-            let owner = state.owner;
+            let owner = clicked
+                .and_then(|hit| state.frame.as_ref()?.handler_owner(hit))
+                .unwrap_or(state.owner);
             if let Err(error) = state.runtime.ui().spawn(&state.owners, owner, future) {
-                panic!("async click handler could not be scheduled: {error}");
+                tracing::error!(%error, ?owner, "async click handler could not be scheduled");
             }
         }
         let dirty = state.owners.dirty_len() != 0;
@@ -1449,6 +1464,10 @@ fn run_message_loop() -> Result<(), AppError> {
         }
         if status.0 == 0 {
             return Ok(());
+        }
+        if message.hwnd.0.is_null() && message.message == WM_ANMIXIU_WAKE {
+            with_app_session(AppSession::wake);
+            continue;
         }
         // SAFETY: The message came from GetMessageW and remains valid for translation/dispatch.
         unsafe {

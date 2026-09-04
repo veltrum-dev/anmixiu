@@ -1,5 +1,7 @@
 use std::{cell::RefCell, fmt, future::Future, pin::Pin, rc::Rc};
 
+use anmixiu_reactive::OwnerId;
+
 use super::{id::ElementId, stateful::Stateful, style::StyleRefinement};
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
@@ -7,6 +9,10 @@ type LocalFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 enum ClickKind {
     Sync(RefCell<Box<dyn FnMut()>>),
     Async(RefCell<Box<dyn FnMut() -> LocalFuture>>),
+    Bound {
+        handler: Rc<ClickKind>,
+        owner: OwnerId,
+    },
 }
 
 #[derive(Clone)]
@@ -44,6 +50,27 @@ impl ClickHandler {
                 None
             }
             ClickKind::Async(callback) => Some((callback.borrow_mut())()),
+            ClickKind::Bound { handler, .. } => Self(handler.clone()).invoke(),
+        }
+    }
+
+    pub(crate) fn bind_owner(&mut self, owner: OwnerId) {
+        if self.owner_id() == Some(owner) {
+            return;
+        }
+        let handler = match self.0.as_ref() {
+            ClickKind::Bound { handler, .. } => handler.clone(),
+            ClickKind::Sync(_) | ClickKind::Async(_) => self.0.clone(),
+        };
+        self.0 = Rc::new(ClickKind::Bound { handler, owner });
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn owner_id(&self) -> Option<OwnerId> {
+        match self.0.as_ref() {
+            ClickKind::Bound { owner, .. } => Some(*owner),
+            ClickKind::Sync(_) | ClickKind::Async(_) => None,
         }
     }
 }

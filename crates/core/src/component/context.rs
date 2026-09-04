@@ -1,7 +1,7 @@
 use std::{cell::Cell, future::Future, marker::PhantomData, pin::Pin, rc::Rc};
 
 use anmixiu_reactive::{OwnerId, OwnerRegistry};
-use anmixiu_runtime::UiSpawner;
+use anmixiu_runtime::{SpawnError, UiSpawner};
 
 use crate::{
     AppEvents, AppHandle, AppStateStore, EventContext, EventError, EventPriority, EventScope,
@@ -9,8 +9,20 @@ use crate::{
 };
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
-type SpawnFn = dyn Fn(LocalFuture);
-type OwnerSpawnFn = dyn Fn(OwnerId, LocalFuture);
+type SpawnFn = dyn Fn(LocalFuture) -> Result<(), SpawnError>;
+type OwnerSpawnFn = dyn Fn(OwnerId, LocalFuture) -> Result<(), SpawnError>;
+
+#[derive(Clone)]
+pub(crate) struct ContextServices {
+    app_state: AppStateStore,
+    window_state: WindowStateStore,
+    app_events: AppEvents,
+    window_id: WindowId,
+    app_handle: AppHandle,
+    window_handle: WindowHandle,
+    registry: OwnerRegistry,
+    owner_spawn: Option<Rc<OwnerSpawnFn>>,
+}
 
 pub struct Context<C: 'static> {
     app_state: AppStateStore,
@@ -20,6 +32,7 @@ pub struct Context<C: 'static> {
     app_handle: AppHandle,
     window_handle: WindowHandle,
     spawn: Option<Rc<SpawnFn>>,
+    owner_spawn: Option<Rc<OwnerSpawnFn>>,
     pub(super) registry: OwnerRegistry,
     pub(super) owner: OwnerId,
     owner_alive: Rc<Cell<bool>>,
@@ -36,6 +49,7 @@ impl<C: 'static> Clone for Context<C> {
             app_handle: self.app_handle.clone(),
             window_handle: self.window_handle.clone(),
             spawn: self.spawn.clone(),
+            owner_spawn: self.owner_spawn.clone(),
             registry: self.registry.clone(),
             owner: self.owner,
             owner_alive: self.owner_alive.clone(),
@@ -80,6 +94,7 @@ impl<C: 'static> Context<C> {
             app_handle: AppHandle::disconnected(),
             window_handle: WindowHandle::disconnected(window_id),
             spawn: None,
+            owner_spawn: None,
             registry,
             owner,
             owner_alive: Rc::new(Cell::new(true)),
@@ -92,7 +107,7 @@ impl<C: 'static> Context<C> {
     pub fn with_spawner(
         app_state: AppStateStore,
         window_state: WindowStateStore,
-        spawn: impl Fn(LocalFuture) + 'static,
+        spawn: impl Fn(LocalFuture) -> Result<(), SpawnError> + 'static,
     ) -> Self {
         Self::with_spawner_and_events(
             app_state,
@@ -110,10 +125,15 @@ impl<C: 'static> Context<C> {
         window_state: WindowStateStore,
         app_events: AppEvents,
         window_id: WindowId,
-        spawn: impl Fn(LocalFuture) + 'static,
+        spawn: impl Fn(LocalFuture) -> Result<(), SpawnError> + 'static,
     ) -> Self {
         let registry = OwnerRegistry::new();
         let owner = registry.create_owner();
+        let spawn: Rc<SpawnFn> = Rc::new(spawn);
+        let owner_spawn: Rc<OwnerSpawnFn> = {
+            let spawn = spawn.clone();
+            Rc::new(move |_owner, future| spawn(future))
+        };
         Self {
             app_state,
             window_state,
@@ -121,7 +141,8 @@ impl<C: 'static> Context<C> {
             window_id,
             app_handle: AppHandle::disconnected(),
             window_handle: WindowHandle::disconnected(window_id),
-            spawn: Some(Rc::new(spawn)),
+            spawn: Some(spawn),
+            owner_spawn: Some(owner_spawn),
             registry,
             owner,
             owner_alive: Rc::new(Cell::new(true)),
@@ -135,7 +156,7 @@ impl<C: 'static> Context<C> {
         app_state: AppStateStore,
         window_state: WindowStateStore,
         registry: OwnerRegistry,
-        spawn: impl Fn(OwnerId, LocalFuture) + 'static,
+        spawn: impl Fn(OwnerId, LocalFuture) -> Result<(), SpawnError> + 'static,
     ) -> Self {
         Self::with_owner_spawner_and_events(
             app_state,
@@ -155,11 +176,11 @@ impl<C: 'static> Context<C> {
         app_events: AppEvents,
         window_id: WindowId,
         registry: OwnerRegistry,
-        spawn: impl Fn(OwnerId, LocalFuture) + 'static,
+        spawn: impl Fn(OwnerId, LocalFuture) -> Result<(), SpawnError> + 'static,
     ) -> Self {
         let owner = registry.create_owner();
-        let spawn: Rc<OwnerSpawnFn> = Rc::new(spawn);
-        let owner_spawn = spawn.clone();
+        let owner_spawn: Rc<OwnerSpawnFn> = Rc::new(spawn);
+        let bound_spawn = owner_spawn.clone();
         Self {
             app_state,
             window_state,
@@ -167,7 +188,8 @@ impl<C: 'static> Context<C> {
             window_id,
             app_handle: AppHandle::disconnected(),
             window_handle: WindowHandle::disconnected(window_id),
-            spawn: Some(Rc::new(move |future| owner_spawn(owner, future))),
+            spawn: Some(Rc::new(move |future| bound_spawn(owner, future))),
+            owner_spawn: Some(owner_spawn),
             registry,
             owner,
             owner_alive: Rc::new(Cell::new(true)),
@@ -190,6 +212,9 @@ impl<C: 'static> Context<C> {
         let window_id = window_handle.id();
         let owner = registry.create_owner();
         let owner_spawner = spawner.clone();
+        let owner_spawn: Rc<OwnerSpawnFn> =
+            Rc::new(move |owner, future| owner_spawner.spawn(owner, future));
+        let bound_spawn = owner_spawn.clone();
         Self {
             app_state,
             window_state,
@@ -197,11 +222,8 @@ impl<C: 'static> Context<C> {
             window_id,
             app_handle,
             window_handle,
-            spawn: Some(Rc::new(move |future| {
-                if let Err(error) = owner_spawner.spawn(owner, future) {
-                    panic!("Context::spawn failed: {error}");
-                }
-            })),
+            spawn: Some(Rc::new(move |future| bound_spawn(owner, future))),
+            owner_spawn: Some(owner_spawn),
             registry,
             owner,
             owner_alive: Rc::new(Cell::new(true)),
@@ -280,14 +302,19 @@ impl<C: 'static> Context<C> {
 
     /// Schedules an owner-bound local UI future.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics when used with a test-only context that has no application runtime.
-    pub fn spawn(&mut self, future: impl Future<Output = ()> + 'static) {
+    /// Returns [`SpawnError`] when the owner or executor is no longer live, the call is made from
+    /// the wrong thread, or the application has reached its bounded UI-task capacity. A context
+    /// without an application runtime reports [`SpawnError::ExecutorStopped`].
+    pub fn spawn(&mut self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
+        if !self.owner_alive.get() {
+            return Err(SpawnError::OwnerNotAlive);
+        }
         let Some(spawn) = &self.spawn else {
-            panic!("Context::spawn requires a running Anmixiu application");
+            return Err(SpawnError::ExecutorStopped);
         };
-        spawn(Box::pin(future));
+        spawn(Box::pin(future))
     }
 
     /// Requests that this component be re-rendered on the next display frame, as one step of an
@@ -325,5 +352,42 @@ impl<C: 'static> Context<C> {
 
     pub(super) fn deactivate_owner(&self) {
         self.owner_alive.set(false);
+    }
+
+    pub(crate) fn services(&self) -> ContextServices {
+        ContextServices {
+            app_state: self.app_state.clone(),
+            window_state: self.window_state.clone(),
+            app_events: self.app_events.clone(),
+            window_id: self.window_id,
+            app_handle: self.app_handle.clone(),
+            window_handle: self.window_handle.clone(),
+            registry: self.registry.clone(),
+            owner_spawn: self.owner_spawn.clone(),
+        }
+    }
+}
+
+impl ContextServices {
+    pub(crate) fn context<C: 'static>(&self) -> Context<C> {
+        let owner = self.registry.create_owner();
+        let spawn = self.owner_spawn.as_ref().map(|owner_spawn| {
+            let owner_spawn = owner_spawn.clone();
+            Rc::new(move |future| owner_spawn(owner, future)) as Rc<SpawnFn>
+        });
+        Context {
+            app_state: self.app_state.clone(),
+            window_state: self.window_state.clone(),
+            app_events: self.app_events.clone(),
+            window_id: self.window_id,
+            app_handle: self.app_handle.clone(),
+            window_handle: self.window_handle.clone(),
+            spawn,
+            owner_spawn: self.owner_spawn.clone(),
+            registry: self.registry.clone(),
+            owner,
+            owner_alive: Rc::new(Cell::new(true)),
+            marker: PhantomData,
+        }
     }
 }

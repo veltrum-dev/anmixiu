@@ -643,7 +643,7 @@ impl<T: PartialEq + 'static> Signal<T> {
     /// # Panics
     ///
     /// Panics if `T`'s `PartialEq` re-enters this signal with a write while the comparison holds
-    /// the value borrow. (Comparisons that read the signal are already covered by [`with`].)
+    /// the value borrow. (Comparisons that read the signal are already covered by [`Self::with`].)
     pub fn set(&self, value: T) {
         let previous = {
             let mut slot = self.inner.value.borrow_mut();

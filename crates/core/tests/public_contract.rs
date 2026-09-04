@@ -8,13 +8,13 @@ use std::{
 
 use anmixiu_core::{
     AppEvents, AppHandle, AppStateStore, Color, ComponentHost, Context, CursorStyle, Element,
-    ElementId, ElementNode, EventError, EventPriority, EventScope, Eventful, FluentBuilder,
-    FrameBatcher, InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, NodeId,
-    ParentElement, Pixels, PropertyUpdate, Render, RenderOnce, SharedString, State,
+    ElementId, ElementNode, EventBindings, EventError, EventPriority, EventScope, Eventful,
+    FluentBuilder, InteractiveElement, MAX_EVENTS_PER_DISPATCH, MAX_PENDING_EVENTS, ParentElement,
+    Pixels, PropertyUpdate, Render, RenderOnce, ScrollHandle, SharedString, State,
     StatefulInteractiveElement, Styled, Typography, Window, WindowAction, WindowDispatcher,
     WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowMountContext, WindowRoot,
-    WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility, button, div, px, shared_format,
-    text,
+    WindowStateStore, WindowStatus, WindowUpdate, WindowVisibility, button, component, div,
+    eventful_component, px, shared_format, text,
 };
 use anmixiu_reactive::OwnerRegistry;
 use anmixiu_reactive::Signal;
@@ -960,109 +960,6 @@ fn hover_refinement_is_an_interaction_capability_and_keeps_layout_fields_out() {
     assert_eq!(hover.border_color, Some(Color::WHITE));
 }
 
-#[test]
-fn hit_testing_uses_layout_bounds_and_topmost_clickable_node() {
-    let tree = div()
-        .child(button("back").width(px(100.0)).height(px(100.0)))
-        .child(button("front").width(px(40.0)).height(px(40.0)))
-        .into_element_node();
-    let hit = tree.hit_test(20.0, 20.0, |id| match id.index() {
-        1 => Some((0.0, 0.0, 100.0, 100.0)),
-        2 => Some((10.0, 10.0, 40.0, 40.0)),
-        _ => Some((0.0, 0.0, 120.0, 120.0)),
-    });
-    assert_eq!(hit.map(|node| node.text_content()), Some(Some("front")));
-}
-
-#[test]
-fn hit_testing_uses_half_open_bounds_matching_the_scene() {
-    let tree = div()
-        .child(button("target").width(px(40.0)).height(px(30.0)))
-        .into_element_node();
-    let bounds = |id: NodeId| match id.index() {
-        1 => Some((10.0, 20.0, 40.0, 30.0)),
-        _ => Some((0.0, 0.0, 200.0, 200.0)),
-    };
-    // Inside and on the top-left edge: hit.
-    assert_eq!(
-        tree.hit_test(10.0, 20.0, bounds)
-            .and_then(|n| n.text_content()),
-        Some("target"),
-        "top-left corner"
-    );
-    assert_eq!(
-        tree.hit_test(49.999, 49.999, bounds)
-            .and_then(|n| n.text_content()),
-        Some("target"),
-        "just inside"
-    );
-    // Exactly on the right/bottom edge belongs to the next pixel, not this element — the
-    // rendered scene (`Rect::contains`) treats it the same way.
-    assert_ne!(
-        tree.hit_test(50.0, 35.0, bounds)
-            .and_then(|n| n.text_content()),
-        Some("target"),
-        "right edge is exclusive"
-    );
-    assert_ne!(
-        tree.hit_test(30.0, 50.0, bounds)
-            .and_then(|n| n.text_content()),
-        Some("target"),
-        "bottom edge is exclusive"
-    );
-}
-
-#[test]
-fn scheduler_forgets_closed_windows_and_unmounted_components() {
-    let mut batcher = FrameBatcher::new(3);
-    let window = WindowId::new(9);
-    batcher.mark_dirty(window, 10, None);
-    batcher.mark_dirty(window, 11, Some(10));
-    assert_eq!(batcher.frame_requests(window), 1);
-
-    // Forgetting a component clears its pending dirty mark so it is not re-rendered.
-    batcher.forget_component(window, 11);
-    assert_eq!(batcher.begin_frame(window), vec![10]);
-
-    // Forgetting the window resets all of its accumulated state.
-    batcher.forget_window(window);
-    assert_eq!(batcher.frame_requests(window), 0);
-    assert_eq!(batcher.begin_frame(window), Vec::<u64>::new());
-}
-
-#[test]
-fn scheduler_batches_writes_per_window_and_defers_render_time_invalidations() {
-    let mut batcher = FrameBatcher::new(3);
-    let window = WindowId::new(7);
-    batcher.mark_dirty(window, 10, None);
-    batcher.mark_dirty(window, 10, None);
-    batcher.mark_dirty(window, 11, Some(10));
-    assert_eq!(batcher.frame_requests(window), 1);
-    assert_eq!(batcher.begin_frame(window), vec![10]);
-
-    batcher.mark_dirty(window, 10, None);
-    assert!(batcher.finish_frame(window, true));
-    assert_eq!(batcher.submissions(window), 1);
-    assert_eq!(batcher.begin_frame(window), vec![10]);
-
-    assert!(!batcher.finish_frame(window, false));
-    assert_eq!(batcher.submissions(window), 1, "no dirty paint, no submit");
-}
-
-#[test]
-fn scheduler_loop_guard_reports_pathological_invalidation() {
-    let mut batcher = FrameBatcher::new(2);
-    let window = WindowId::new(1);
-    batcher.mark_dirty(window, 1, None);
-    let _ = batcher.begin_frame(window);
-    batcher.mark_dirty(window, 1, None);
-    assert!(batcher.finish_frame(window, true));
-    let _ = batcher.begin_frame(window);
-    batcher.mark_dirty(window, 1, None);
-    assert!(!batcher.finish_frame(window, true));
-    assert!(batcher.take_loop_error(window).is_some());
-}
-
 #[derive(Default)]
 struct Counter {
     count: Signal<u32>,
@@ -1119,7 +1016,8 @@ impl Render for SpawnOnMount {
         cx.spawn(async move {
             let _guard = guard;
             pending::<()>().await;
-        });
+        })
+        .expect("owner task spawns");
     }
 
     fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
@@ -1136,7 +1034,7 @@ fn component_owner_cancels_context_tasks_on_unmount() {
         AppStateStore::new(),
         WindowStateStore::new(),
         owners,
-        move |owner, future| spawner.spawn(owner, future).unwrap(),
+        move |owner, future| spawner.spawn(owner, future),
     );
     let dropped = Rc::new(Cell::new(false));
     let component = Rc::new(SpawnOnMount {
@@ -1153,6 +1051,31 @@ fn component_owner_cancels_context_tasks_on_unmount() {
 }
 
 #[test]
+fn context_spawn_reports_runtime_capacity_without_panicking() {
+    let runtime = AppRuntime::new(|| {}).expect("runtime");
+    let owners = OwnerRegistry::new();
+    let spawner = runtime.ui().spawner(owners.clone());
+    let mut context = Context::<LifecycleProbe>::with_owner_spawner(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        owners.clone(),
+        move |owner, future| spawner.spawn(owner, future),
+    );
+
+    for _ in 0..anmixiu_runtime::MAX_UI_TASKS {
+        context
+            .spawn(pending::<()>())
+            .expect("task below the hard capacity is accepted");
+    }
+    let error = context
+        .spawn(pending::<()>())
+        .expect_err("capacity is a recoverable spawn error");
+    assert_eq!(error, anmixiu_runtime::SpawnError::CapacityReached);
+    assert!(owners.remove_owner(context.owner_id()));
+    runtime.ui().run_ready().expect("cancel tasks");
+}
+
+#[test]
 fn rendered_element_snapshots_share_the_tree_until_the_next_render() {
     let probe = Rc::new(LifecycleProbe::default());
     let mut host = ComponentHost::new(probe, Context::testing());
@@ -1164,4 +1087,181 @@ fn rendered_element_snapshots_share_the_tree_until_the_next_render() {
     host.render().unwrap();
     let second = host.element_snapshot().unwrap();
     assert!(!Rc::ptr_eq(&first, &second));
+}
+
+#[derive(Default)]
+struct NestedLifecycle {
+    mounts: Cell<usize>,
+    renders: Cell<usize>,
+    unmounts: Cell<usize>,
+    value: Signal<u32>,
+}
+
+impl Render for NestedLifecycle {
+    fn on_mount(&self, _cx: &mut Context<Self>) {
+        self.mounts.set(self.mounts.get() + 1);
+    }
+
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        button(shared_format!("nested {}", self.value.get()))
+            .id("nested-value")
+            .on_click(|| async {})
+    }
+
+    fn on_unmount(&self, _cx: &mut Context<Self>) {
+        self.unmounts.set(self.unmounts.get() + 1);
+    }
+}
+
+struct NestedParent {
+    renders: Cell<usize>,
+    show_child: Signal<bool>,
+    child: Rc<NestedLifecycle>,
+}
+
+impl Render for NestedParent {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        div().when(self.show_child.get(), |parent| {
+            parent.child(component(self.child.clone()).id("nested-counter"))
+        })
+    }
+}
+
+#[test]
+fn nested_render_components_have_independent_owners_and_lifecycle() {
+    let child = Rc::new(NestedLifecycle::default());
+    let parent = Rc::new(NestedParent {
+        renders: Cell::new(0),
+        show_child: Signal::new(true),
+        child: child.clone(),
+    });
+    let context = Context::testing();
+    let owners = context.owner_registry().clone();
+    let root_owner = context.owner_id();
+    let mut host = ComponentHost::new(parent.clone(), context);
+
+    host.render().expect("initial component tree renders");
+    host.did_paint();
+    assert_eq!(parent.renders.get(), 1);
+    assert_eq!(child.renders.get(), 1);
+    assert_eq!(child.mounts.get(), 1);
+    assert_eq!(host.reactive_stats().live_owner_count, 2);
+
+    child.value.set(1);
+    let dirty = owners.take_dirty();
+    assert_eq!(dirty.len(), 1);
+    assert_ne!(dirty[0], root_owner, "only the nested owner became dirty");
+    host.render_dirty(&dirty)
+        .expect("dirty nested component rerenders");
+    assert_eq!(parent.renders.get(), 1, "parent render was reused");
+    assert_eq!(child.renders.get(), 2);
+    let child_owner = dirty[0];
+    assert_eq!(
+        host.element()
+            .and_then(|root| root.children_ref().first())
+            .and_then(|boundary| boundary.children_ref().first())
+            .and_then(ElementNode::text_content),
+        Some("nested 1")
+    );
+    assert_eq!(
+        host.element()
+            .and_then(|root| root.children_ref().first())
+            .and_then(|boundary| boundary.children_ref().first())
+            .and_then(ElementNode::click_handler)
+            .and_then(anmixiu_core::ClickHandler::owner_id),
+        Some(child_owner),
+        "async handlers inherit the nested component owner"
+    );
+
+    parent.show_child.set(false);
+    let dirty = owners.take_dirty();
+    host.render_dirty(&dirty)
+        .expect("parent removes nested component");
+    assert_eq!(parent.renders.get(), 2);
+    assert_eq!(child.unmounts.get(), 1);
+    assert_eq!(host.reactive_stats().live_owner_count, 1);
+}
+
+struct NestedEventful {
+    deliveries: Rc<Cell<usize>>,
+}
+
+impl Render for NestedEventful {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        text("eventful child")
+    }
+}
+
+impl Eventful for NestedEventful {
+    fn bind_events(&self, _cx: &mut Context<Self>, bindings: &mut EventBindings) {
+        let deliveries = self.deliveries.clone();
+        bindings.subscribe::<Ping, _>(EventScope::Window, EventPriority::NORMAL, move |_| {
+            deliveries.set(deliveries.get() + 1);
+        });
+    }
+}
+
+struct NestedEventParent(Rc<NestedEventful>);
+
+impl Render for NestedEventParent {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        div().child(eventful_component(self.0.clone()).id("eventful-child"))
+    }
+}
+
+#[test]
+fn nested_eventful_bindings_follow_the_child_lifecycle() {
+    let events = AppEvents::new();
+    let window_id = WindowId::new(41);
+    let context = Context::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events.clone(),
+        window_id,
+    );
+    let deliveries = Rc::new(Cell::new(0));
+    let child = Rc::new(NestedEventful {
+        deliveries: deliveries.clone(),
+    });
+    let mut host = ComponentHost::new(Rc::new(NestedEventParent(child)), context);
+    host.render().expect("nested eventful tree renders");
+    host.did_paint();
+
+    let emitter = Context::<LifecycleProbe>::testing_with_state_and_events(
+        AppStateStore::new(),
+        WindowStateStore::new(),
+        events,
+        window_id,
+    );
+    emitter
+        .emit(Ping, EventScope::Window)
+        .expect("mounted child receives event");
+    assert_eq!(deliveries.get(), 1);
+    host.unmount();
+    emitter
+        .emit(Ping, EventScope::Window)
+        .expect("router remains live after child unmount");
+    assert_eq!(deliveries.get(), 1);
+}
+
+struct ScrollOwner(ScrollHandle);
+
+impl Render for ScrollOwner {
+    fn render(&self, _cx: &mut Context<Self>) -> impl anmixiu_core::IntoElement {
+        div().scroll(&self.0).child(text("scroll content"))
+    }
+}
+
+#[test]
+fn programmatic_scroll_marks_the_owning_component_dirty() {
+    let handle = ScrollHandle::new();
+    let context = Context::testing();
+    let owners = context.owner_registry().clone();
+    let mut host = ComponentHost::new(Rc::new(ScrollOwner(handle.clone())), context);
+    host.render().expect("scroll owner renders");
+
+    handle.set_offset_y(20.0);
+    assert_eq!(owners.take_dirty().len(), 1);
 }

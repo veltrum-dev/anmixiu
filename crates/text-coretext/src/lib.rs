@@ -443,6 +443,12 @@ mod platform {
             self.atlas.repacks
         }
 
+        #[doc(hidden)]
+        #[must_use]
+        pub fn atlas_upload_snapshot(&self) -> AtlasUpload {
+            self.atlas.upload()
+        }
+
         /// Cumulative CoreGraphics rasterizations, useful for validating atlas reuse.
         #[must_use]
         pub const fn rasterized_glyph_count(&self) -> u64 {

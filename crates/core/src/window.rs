@@ -540,6 +540,8 @@ pub struct WindowMountContext {
 #[doc(hidden)]
 pub trait ErasedComponentHost {
     fn render(&mut self) -> Result<&ElementNode, RenderError>;
+    fn render_dirty(&mut self, dirty: &[OwnerId]) -> Result<&ElementNode, RenderError>;
+    fn contains_owner(&self, owner: OwnerId) -> bool;
     fn did_paint(&mut self);
     fn unmount(&mut self);
     fn element_snapshot(&self) -> Option<Rc<ElementNode>>;
@@ -551,6 +553,14 @@ struct TypedComponentHost<C: Render>(ComponentHost<C>);
 impl<C: Render> ErasedComponentHost for TypedComponentHost<C> {
     fn render(&mut self) -> Result<&ElementNode, RenderError> {
         self.0.render()
+    }
+
+    fn render_dirty(&mut self, dirty: &[OwnerId]) -> Result<&ElementNode, RenderError> {
+        self.0.render_dirty(dirty)
+    }
+
+    fn contains_owner(&self, owner: OwnerId) -> bool {
+        self.0.contains_owner(owner)
     }
 
     fn did_paint(&mut self) {

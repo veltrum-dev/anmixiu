@@ -36,7 +36,6 @@ using the final workspace and `cargo bench --workspace`:
 | Shared UI string clone | long label: 9.66–9.67 ns | 1,000 clones: 0 allocated bytes |
 | Shared short formatting | `Count 42`: 5.75–5.77 ns | 1,000 static labels: 0 allocated bytes |
 | macOS frame projection | 100 cached buttons: 59.4–60.3 µs | hover Scene rebuild: 82.9–91.9 µs |
-| Frame dirty dedup + drain | 32 components: 2.55–2.66 µs | 4,096: 572.8–574.2 µs |
 | Signal notify + dirty take | 1 owner: 197.5–203.5 ns | 1,000: 84.6–86.9 µs |
 | Duplicate dirty insertion | 10 writes: 207.8–219.9 ns | 100,000: 1.584–1.586 ms |
 | Taffy uncached Flexbox | 100 nodes: 25.01–25.17 µs | 5,000: 1.381–1.391 ms |
