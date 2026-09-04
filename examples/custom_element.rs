@@ -82,11 +82,19 @@ fn main() -> Result<(), anmixiu::AppError> {
         .init();
 
     let panel = CustomPanel::new().child(StatusBadge::new("Mounted with #[derive(Element)]"));
+    let view = div()
+        .width(700.0)
+        .height(500.0)
+        .padding(32.0)
+        .align(AlignItems::Center)
+        .justify(JustifyContent::Center)
+        .background(Color::rgb(0.012, 0.018, 0.035))
+        .child(panel);
     App::new()
         .window(
             Window::new()
                 .title("Anmixiu Custom Element")
                 .size(700.0, 500.0),
         )
-        .run(panel)
+        .run(view)
 }
