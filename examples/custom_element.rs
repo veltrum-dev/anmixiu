@@ -83,8 +83,6 @@ fn main() -> Result<(), anmixiu::AppError> {
 
     let panel = CustomPanel::new().child(StatusBadge::new("Mounted with #[derive(Element)]"));
     let view = div()
-        .width(700.0)
-        .height(500.0)
         .padding(32.0)
         .align(AlignItems::Center)
         .justify(JustifyContent::Center)
