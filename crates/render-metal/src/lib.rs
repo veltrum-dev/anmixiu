@@ -81,6 +81,8 @@ pub struct RenderStats {
     pub composited_frames: u64,
     /// Ordered backdrop blur operations encoded across all submitted frames.
     pub backdrop_blur_operations: u64,
+    /// Element-subtree filter blur operations encoded across all submitted frames.
+    pub filter_blur_operations: u64,
     /// Bytes retained by the bounded in-flight compositor texture ring.
     pub compositor_texture_bytes: usize,
 }
@@ -163,11 +165,15 @@ pub enum RenderError {
     MissingAtlas { atlas: u64 },
     #[error("a scene may contain at most 64 backdrop blur operations")]
     TooManyBackdropBlurs,
-    #[error("backdrop compositor textures exceed the 256 MiB hard budget")]
+    #[error("a scene may contain at most 64 filter blur operations")]
+    TooManyFilterBlurs,
+    #[error("filter blur nesting may not exceed 8 layers")]
+    FilterBlurNestingTooDeep,
+    #[error("compositor textures exceed the 256 MiB hard budget")]
     CompositorBudgetExceeded,
-    #[error("all three bounded backdrop compositor slots are still in flight")]
+    #[error("all three bounded compositor slots are still in flight")]
     CompositorBusy,
-    #[error("backdrop compositor resources were not prepared for the scene")]
+    #[error("compositor resources were not prepared for the scene")]
     CompositorResourcesUnavailable,
     #[error("Metal command buffer failed")]
     CommandBufferFailed,
@@ -184,7 +190,8 @@ mod platform {
     use std::mem::{size_of, size_of_val};
 
     use anmixiu_scene::{
-        AtlasId, AtlasUpload, Clip, Color, DrawCommand, Glyph, MAX_BACKDROP_BLUR_SIGMA, Rect, Scene,
+        AtlasId, AtlasUpload, Clip, Color, DrawCommand, Glyph, MAX_BACKDROP_BLUR_SIGMA,
+        MAX_FILTER_BLUR_SIGMA, Rect, Scene,
     };
     use core_graphics::geometry::CGSize;
     use metal::{
@@ -215,6 +222,7 @@ mod platform {
         clip_rect: [f32; 4],
         misc: [f32; 4],
         uv_rect: [f32; 4],
+        sample_uv_bounds: [f32; 4],
     }
 
     struct CachedAtlas {
@@ -225,6 +233,8 @@ mod platform {
 
     const COMPOSITOR_SLOT_COUNT: usize = 3;
     const MAX_BACKDROP_BLURS_PER_FRAME: usize = 64;
+    const MAX_FILTER_BLURS_PER_FRAME: usize = 64;
+    const MAX_FILTER_BLUR_DEPTH: usize = 8;
     const TARGET_DOWNSAMPLED_SIGMA: f32 = 8.0;
     const MAX_DOWNSAMPLE: u32 = 16;
     const COMPOSITOR_TEXTURE_BUDGET: usize = 256 * 1024 * 1024;
@@ -242,6 +252,7 @@ mod platform {
         scene_format: Option<MTLPixelFormat>,
         scene: Option<Texture>,
         blur: Option<BlurTextures>,
+        filter_layers: Vec<Texture>,
     }
 
     impl CompositeSlot {
@@ -252,6 +263,7 @@ mod platform {
                 scene_format: None,
                 scene: None,
                 blur: None,
+                filter_layers: Vec::new(),
             }
         }
     }
@@ -260,6 +272,7 @@ mod platform {
     struct BlurPlan {
         sample_bounds: Rect,
         scratch_size: SurfaceSize,
+        downsample: u32,
         effective_sigma: f32,
     }
 
@@ -270,8 +283,14 @@ mod platform {
         bgra_border: RenderPipelineState,
         rgba_image: RenderPipelineState,
         bgra_image: RenderPipelineState,
+        rgba_downsample: RenderPipelineState,
+        bgra_downsample: RenderPipelineState,
         rgba_blur: RenderPipelineState,
         bgra_blur: RenderPipelineState,
+        rgba_filter_blur: RenderPipelineState,
+        bgra_filter_blur: RenderPipelineState,
+        rgba_filter_composite: RenderPipelineState,
+        bgra_filter_composite: RenderPipelineState,
     }
 
     enum EncodeOutcome {
@@ -288,8 +307,14 @@ mod platform {
         bgra_border_pipeline: RenderPipelineState,
         rgba_image_pipeline: RenderPipelineState,
         bgra_image_pipeline: RenderPipelineState,
+        rgba_downsample_pipeline: RenderPipelineState,
+        bgra_downsample_pipeline: RenderPipelineState,
         rgba_blur_pipeline: RenderPipelineState,
         bgra_blur_pipeline: RenderPipelineState,
+        rgba_filter_blur_pipeline: RenderPipelineState,
+        bgra_filter_blur_pipeline: RenderPipelineState,
+        rgba_filter_composite_pipeline: RenderPipelineState,
+        bgra_filter_composite_pipeline: RenderPipelineState,
         unit_quad: Buffer,
         atlas_capacity: usize,
         atlas_textures: HashMap<AtlasId, CachedAtlas>,
@@ -344,8 +369,14 @@ mod platform {
                 bgra_border_pipeline: pipelines.bgra_border,
                 rgba_image_pipeline: pipelines.rgba_image,
                 bgra_image_pipeline: pipelines.bgra_image,
+                rgba_downsample_pipeline: pipelines.rgba_downsample,
+                bgra_downsample_pipeline: pipelines.bgra_downsample,
                 rgba_blur_pipeline: pipelines.rgba_blur,
                 bgra_blur_pipeline: pipelines.bgra_blur,
+                rgba_filter_blur_pipeline: pipelines.rgba_filter_blur,
+                bgra_filter_blur_pipeline: pipelines.bgra_filter_blur,
+                rgba_filter_composite_pipeline: pipelines.rgba_filter_composite,
+                bgra_filter_composite_pipeline: pipelines.bgra_filter_composite,
                 unit_quad,
                 atlas_capacity: config.atlas_texture_capacity,
                 atlas_textures: HashMap::with_capacity(config.atlas_texture_capacity),
@@ -386,7 +417,7 @@ mod platform {
         pub fn configure_layer(&self, layer: &MetalLayerRef, size: SurfaceSize, scale: f32) {
             self.configured_surface.set(Some(size));
             layer.set_device(&self.device);
-            layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm_sRGB);
             layer.set_framebuffer_only(true);
             // Coordinate drawable presentation with AppKit's live-resize transaction. Returning
             // before the command buffer is scheduled lets Core Animation stretch the previous
@@ -505,7 +536,7 @@ mod platform {
                 })?;
             let size = SurfaceSize::new(width, height)?;
             let command_buffer =
-                match self.encode(scene, texture, size, scale, MTLPixelFormat::BGRA8Unorm)? {
+                match self.encode(scene, texture, size, scale, MTLPixelFormat::BGRA8Unorm_sRGB)? {
                     EncodeOutcome::Encoded(command_buffer) => command_buffer,
                     EncodeOutcome::CompositorBusy => {
                         return Ok(FrameOutcome::CompositorBusy {
@@ -562,15 +593,20 @@ mod platform {
             let descriptor = TextureDescriptor::new();
             descriptor.set_width(u64::from(size.width));
             descriptor.set_height(u64::from(size.height));
-            descriptor.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+            descriptor.set_pixel_format(MTLPixelFormat::RGBA8Unorm_sRGB);
             descriptor.set_storage_mode(MTLStorageMode::Shared);
             descriptor.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
             let texture = self.device.new_texture(&descriptor);
-            let command_buffer =
-                match self.encode(scene, &texture, size, scale, MTLPixelFormat::RGBA8Unorm)? {
-                    EncodeOutcome::Encoded(command_buffer) => command_buffer,
-                    EncodeOutcome::CompositorBusy => return Err(RenderError::CompositorBusy),
-                };
+            let command_buffer = match self.encode(
+                scene,
+                &texture,
+                size,
+                scale,
+                MTLPixelFormat::RGBA8Unorm_sRGB,
+            )? {
+                EncodeOutcome::Encoded(command_buffer) => command_buffer,
+                EncodeOutcome::CompositorBusy => return Err(RenderError::CompositorBusy),
+            };
             command_buffer.commit();
             command_buffer.wait_until_completed();
             if command_buffer.status() == MTLCommandBufferStatus::Error {
@@ -746,18 +782,19 @@ mod platform {
                     slot.scene_size = None;
                     slot.scene_format = None;
                     slot.blur = None;
+                    slot.filter_layers.clear();
                 }
             }
-            let blur_count = scene
-                .commands()
-                .iter()
-                .filter(|command| matches!(command, DrawCommand::BackdropBlur { .. }))
-                .count();
-            if blur_count > MAX_BACKDROP_BLURS_PER_FRAME {
+            let requirements = compositor_requirements(scene.commands(), size, scale)?;
+            if requirements.backdrop_blur_count > MAX_BACKDROP_BLURS_PER_FRAME {
                 return Err(RenderError::TooManyBackdropBlurs);
             }
-            let planned_scratch_size = largest_scratch_size(scene, size, scale);
-            let desired_slot_bytes = compositor_plan_bytes(size, planned_scratch_size);
+            if requirements.filter_blur_count > MAX_FILTER_BLURS_PER_FRAME {
+                return Err(RenderError::TooManyFilterBlurs);
+            }
+            let planned_scratch_size = requirements.scratch_size;
+            let desired_slot_bytes =
+                compositor_plan_bytes(size, planned_scratch_size, requirements.filter_layer_depth);
             let retained_other_bytes = self
                 .compositor_slots
                 .iter()
@@ -779,6 +816,7 @@ mod platform {
                     slot.scene_size = Some(size);
                     slot.scene_format = Some(format);
                     slot.blur = None;
+                    slot.filter_layers.clear();
                 }
                 if let Some(scratch_size) = planned_scratch_size {
                     if slot.blur.as_ref().is_none_or(|textures| {
@@ -788,6 +826,11 @@ mod platform {
                     }
                 } else {
                     slot.blur = None;
+                }
+                if slot.filter_layers.len() != requirements.filter_layer_depth {
+                    slot.filter_layers = (0..requirements.filter_layer_depth)
+                        .map(|_| color_texture(&self.device, size, format))
+                        .collect();
                 }
             }
             Ok(())
@@ -810,70 +853,17 @@ mod platform {
                 .map(|texture| TextureRef::to_owned(texture))
                 .ok_or(RenderError::CompositorResourcesUnavailable)?;
             let command_buffer = self.queue.new_command_buffer().to_owned();
-            let mut encoder = begin_render_pass(
+            self.encode_commands(
                 &command_buffer,
                 &scene_texture,
+                scene.commands(),
+                size,
+                scale,
+                format,
+                slot_index,
+                0,
                 MTLLoadAction::Clear,
-                MTLClearColor::new(0.0, 0.0, 0.0, 0.0),
             )?;
-            self.configure_primitive_encoder(encoder, size, format);
-            let mut border_pipeline_selected = false;
-
-            for command in scene.commands() {
-                if let DrawCommand::BackdropBlur {
-                    bounds,
-                    corner_radius,
-                    clip,
-                    ..
-                } = command
-                {
-                    let Some(plan) = blur_plan(command, size, scale) else {
-                        continue;
-                    };
-                    encoder.end_encoding();
-                    let (first, second) = self
-                        .compositor_slots
-                        .get(slot_index)
-                        .and_then(|slot| slot.blur.as_ref())
-                        .map(|textures| {
-                            (
-                                TextureRef::to_owned(&textures.first),
-                                TextureRef::to_owned(&textures.second),
-                            )
-                        })
-                        .ok_or(RenderError::CompositorResourcesUnavailable)?;
-                    self.encode_backdrop_blur(
-                        &command_buffer,
-                        &scene_texture,
-                        &first,
-                        &second,
-                        plan,
-                        *bounds,
-                        *corner_radius,
-                        *clip,
-                        size,
-                        scale,
-                        format,
-                    )?;
-                    encoder = begin_render_pass(
-                        &command_buffer,
-                        &scene_texture,
-                        MTLLoadAction::Load,
-                        MTLClearColor::new(0.0, 0.0, 0.0, 0.0),
-                    )?;
-                    self.configure_primitive_encoder(encoder, size, format);
-                    border_pipeline_selected = false;
-                    continue;
-                }
-                self.encode_primitive(
-                    encoder,
-                    command,
-                    scale,
-                    format,
-                    &mut border_pipeline_selected,
-                )?;
-            }
-            encoder.end_encoding();
 
             let final_uniforms = image_uniforms(
                 Rect::new(
@@ -901,6 +891,207 @@ mod platform {
         }
 
         #[allow(clippy::too_many_arguments)]
+        fn encode_commands(
+            &mut self,
+            command_buffer: &metal::CommandBufferRef,
+            target: &TextureRef,
+            commands: &[DrawCommand],
+            size: SurfaceSize,
+            scale: f32,
+            format: MTLPixelFormat,
+            slot_index: usize,
+            filter_depth: usize,
+            load_action: MTLLoadAction,
+        ) -> Result<(), RenderError> {
+            let mut encoder = begin_render_pass(
+                command_buffer,
+                target,
+                load_action,
+                MTLClearColor::new(0.0, 0.0, 0.0, 0.0),
+            )?;
+            self.configure_primitive_encoder(encoder, size, format);
+            let mut border_pipeline_selected = false;
+            for command in commands {
+                match command {
+                    DrawCommand::BackdropBlur {
+                        bounds,
+                        corner_radius,
+                        clip,
+                        ..
+                    } => {
+                        let Some(plan) = blur_plan(command, size, scale) else {
+                            continue;
+                        };
+                        encoder.end_encoding();
+                        let (first, second) = self.blur_textures_for_slot(slot_index)?;
+                        self.encode_backdrop_blur(
+                            command_buffer,
+                            target,
+                            &first,
+                            &second,
+                            plan,
+                            *bounds,
+                            *corner_radius,
+                            *clip,
+                            size,
+                            scale,
+                            format,
+                        )?;
+                        encoder = begin_render_pass(
+                            command_buffer,
+                            target,
+                            MTLLoadAction::Load,
+                            MTLClearColor::new(0.0, 0.0, 0.0, 0.0),
+                        )?;
+                        self.configure_primitive_encoder(encoder, size, format);
+                        border_pipeline_selected = false;
+                    }
+                    DrawCommand::FilterBlur {
+                        sigma,
+                        clip,
+                        commands,
+                    } => {
+                        encoder.end_encoding();
+                        if let Some(plan) = filter_blur_plan(*sigma, size, scale) {
+                            self.encode_filter_blur(
+                                command_buffer,
+                                target,
+                                commands,
+                                *clip,
+                                plan,
+                                size,
+                                scale,
+                                format,
+                                slot_index,
+                                filter_depth,
+                            )?;
+                        } else {
+                            self.encode_commands(
+                                command_buffer,
+                                target,
+                                commands,
+                                size,
+                                scale,
+                                format,
+                                slot_index,
+                                filter_depth,
+                                MTLLoadAction::Load,
+                            )?;
+                        }
+                        encoder = begin_render_pass(
+                            command_buffer,
+                            target,
+                            MTLLoadAction::Load,
+                            MTLClearColor::new(0.0, 0.0, 0.0, 0.0),
+                        )?;
+                        self.configure_primitive_encoder(encoder, size, format);
+                        border_pipeline_selected = false;
+                    }
+                    DrawCommand::SolidQuad { .. }
+                    | DrawCommand::RoundedQuad { .. }
+                    | DrawCommand::RoundedBorder { .. }
+                    | DrawCommand::Glyphs { .. } => self.encode_primitive(
+                        encoder,
+                        command,
+                        scale,
+                        format,
+                        &mut border_pipeline_selected,
+                    )?,
+                }
+            }
+            encoder.end_encoding();
+            Ok(())
+        }
+
+        fn blur_textures_for_slot(
+            &self,
+            slot_index: usize,
+        ) -> Result<(Texture, Texture), RenderError> {
+            self.compositor_slots
+                .get(slot_index)
+                .and_then(|slot| slot.blur.as_ref())
+                .map(|textures| {
+                    (
+                        TextureRef::to_owned(&textures.first),
+                        TextureRef::to_owned(&textures.second),
+                    )
+                })
+                .ok_or(RenderError::CompositorResourcesUnavailable)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encode_filter_blur(
+            &mut self,
+            command_buffer: &metal::CommandBufferRef,
+            target: &TextureRef,
+            commands: &[DrawCommand],
+            clip: Option<Clip>,
+            plan: BlurPlan,
+            scene_size: SurfaceSize,
+            scale: f32,
+            format: MTLPixelFormat,
+            slot_index: usize,
+            filter_depth: usize,
+        ) -> Result<(), RenderError> {
+            let layer = self
+                .compositor_slots
+                .get(slot_index)
+                .and_then(|slot| slot.filter_layers.get(filter_depth))
+                .map(|texture| TextureRef::to_owned(texture))
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            self.encode_commands(
+                command_buffer,
+                &layer,
+                commands,
+                scene_size,
+                scale,
+                format,
+                slot_index,
+                filter_depth.saturating_add(1),
+                MTLLoadAction::Clear,
+            )?;
+            let (first, second) = self.blur_textures_for_slot(slot_index)?;
+            let allocated_scratch = self.encode_blur_passes(
+                command_buffer,
+                &layer,
+                &first,
+                &second,
+                plan,
+                scene_size,
+                format,
+                true,
+            )?;
+            let logical_surface = Rect::new(
+                anmixiu_scene::Point::new(0.0, 0.0),
+                anmixiu_scene::Size::new(
+                    scene_size.width as f32 / scale,
+                    scene_size.height as f32 / scale,
+                ),
+            );
+            let content_uv_scale = [
+                plan.scratch_size.width as f32 / allocated_scratch.width as f32,
+                plan.scratch_size.height as f32 / allocated_scratch.height as f32,
+            ];
+            let mut composite =
+                image_uniforms(logical_surface, [0.0, 0.0, 1.0, 1.0], 0.0, clip, scale);
+            composite.uv_rect = [0.0, 0.0, content_uv_scale[0], content_uv_scale[1]];
+            composite.sample_uv_bounds = content_texel_bounds(plan.scratch_size, allocated_scratch);
+            encode_texture_quad(
+                command_buffer,
+                target,
+                scene_size,
+                MTLLoadAction::Load,
+                filter_composite_pipeline(self, format),
+                &self.unit_quad,
+                &first,
+                &composite,
+            )?;
+            self.stats.draw_calls = self.stats.draw_calls.saturating_add(4);
+            self.stats.filter_blur_operations = self.stats.filter_blur_operations.saturating_add(1);
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
         fn encode_backdrop_blur(
             &mut self,
             command_buffer: &metal::CommandBufferRef,
@@ -915,6 +1106,58 @@ mod platform {
             scale: f32,
             format: MTLPixelFormat,
         ) -> Result<(), RenderError> {
+            let allocated_scratch = self.encode_blur_passes(
+                command_buffer,
+                scene_texture,
+                first,
+                second,
+                plan,
+                scene_size,
+                format,
+                false,
+            )?;
+            let physical_bounds = Rect::new(
+                anmixiu_scene::Point::new(bounds.origin.x * scale, bounds.origin.y * scale),
+                anmixiu_scene::Size::new(bounds.size.width * scale, bounds.size.height * scale),
+            );
+            let content_uv_scale = [
+                plan.scratch_size.width as f32 / allocated_scratch.width as f32,
+                plan.scratch_size.height as f32 / allocated_scratch.height as f32,
+            ];
+            let composite_uv = scale_uv_rect(
+                relative_rect(physical_bounds, plan.sample_bounds),
+                content_uv_scale,
+            );
+            let mut composite = image_uniforms(bounds, composite_uv, corner_radius, clip, scale);
+            composite.sample_uv_bounds = content_texel_bounds(plan.scratch_size, allocated_scratch);
+            encode_texture_quad(
+                command_buffer,
+                scene_texture,
+                scene_size,
+                MTLLoadAction::Load,
+                image_pipeline(self, format),
+                &self.unit_quad,
+                first,
+                &composite,
+            )?;
+            self.stats.draw_calls = self.stats.draw_calls.saturating_add(4);
+            self.stats.backdrop_blur_operations =
+                self.stats.backdrop_blur_operations.saturating_add(1);
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encode_blur_passes(
+            &self,
+            command_buffer: &metal::CommandBufferRef,
+            source: &TextureRef,
+            first: &TextureRef,
+            second: &TextureRef,
+            plan: BlurPlan,
+            scene_size: SurfaceSize,
+            format: MTLPixelFormat,
+            transparent_edges: bool,
+        ) -> Result<SurfaceSize, RenderError> {
             let allocated_scratch = texture_surface_size(first)?;
             let scratch_bounds = Rect::new(
                 anmixiu_scene::Point::new(0.0, 0.0),
@@ -924,15 +1167,27 @@ mod platform {
                 ),
             );
             let extract_uv = normalized_rect(plan.sample_bounds, scene_size);
-            let extract = image_uniforms(scratch_bounds, extract_uv, 0.0, None, 1.0);
+            let mut extract = image_uniforms(scratch_bounds, extract_uv, 0.0, None, 1.0);
+            extract.sample_uv_bounds = normalized_texel_bounds(plan.sample_bounds, scene_size);
+            let extract_pipeline = if plan.downsample == 1 {
+                image_pipeline(self, format)
+            } else {
+                extract.misc = [
+                    plan.downsample as f32,
+                    1.0 / scene_size.width as f32,
+                    1.0 / scene_size.height as f32,
+                    f32::from(!rect_fills_surface(plan.sample_bounds, scene_size)),
+                ];
+                downsample_pipeline(self, format)
+            };
             encode_texture_quad(
                 command_buffer,
                 first,
                 plan.scratch_size,
                 MTLLoadAction::Clear,
-                image_pipeline(self, format),
+                extract_pipeline,
                 &self.unit_quad,
-                scene_texture,
+                source,
                 &extract,
             )?;
 
@@ -947,7 +1202,11 @@ mod platform {
                 second,
                 plan.scratch_size,
                 MTLLoadAction::Clear,
-                blur_pipeline(self, format),
+                if transparent_edges {
+                    filter_blur_pipeline(self, format)
+                } else {
+                    blur_pipeline(self, format)
+                },
                 &self.unit_quad,
                 first,
                 &horizontal,
@@ -963,39 +1222,17 @@ mod platform {
                 first,
                 plan.scratch_size,
                 MTLLoadAction::Clear,
-                blur_pipeline(self, format),
+                if transparent_edges {
+                    filter_blur_pipeline(self, format)
+                } else {
+                    blur_pipeline(self, format)
+                },
                 &self.unit_quad,
                 second,
                 &vertical,
             )?;
 
-            let physical_bounds = Rect::new(
-                anmixiu_scene::Point::new(bounds.origin.x * scale, bounds.origin.y * scale),
-                anmixiu_scene::Size::new(bounds.size.width * scale, bounds.size.height * scale),
-            );
-            let content_uv_scale = [
-                plan.scratch_size.width as f32 / allocated_scratch.width as f32,
-                plan.scratch_size.height as f32 / allocated_scratch.height as f32,
-            ];
-            let composite_uv = scale_uv_rect(
-                relative_rect(physical_bounds, plan.sample_bounds),
-                content_uv_scale,
-            );
-            let composite = image_uniforms(bounds, composite_uv, corner_radius, clip, scale);
-            encode_texture_quad(
-                command_buffer,
-                scene_texture,
-                scene_size,
-                MTLLoadAction::Load,
-                image_pipeline(self, format),
-                &self.unit_quad,
-                first,
-                &composite,
-            )?;
-            self.stats.draw_calls = self.stats.draw_calls.saturating_add(4);
-            self.stats.backdrop_blur_operations =
-                self.stats.backdrop_blur_operations.saturating_add(1);
-            Ok(())
+            Ok(allocated_scratch)
         }
 
         fn configure_primitive_encoder(
@@ -1083,7 +1320,7 @@ mod platform {
                     }
                     Ok(())
                 }
-                DrawCommand::BackdropBlur { .. } => Ok(()),
+                DrawCommand::BackdropBlur { .. } | DrawCommand::FilterBlur { .. } => Ok(()),
             }
         }
 
@@ -1117,7 +1354,7 @@ mod platform {
                 rect_array(glyph.uv_bounds, 1.0)
             });
             let uniforms = DrawUniforms {
-                color: [color.r, color.g, color.b, color.a],
+                color: linear_srgb_color(color),
                 bounds: rect_array(bounds, scale),
                 clip_rect,
                 misc: [
@@ -1127,6 +1364,7 @@ mod platform {
                     has_clip,
                 ],
                 uv_rect,
+                sample_uv_bounds: [0.0, 0.0, 1.0, 1.0],
             };
             encoder.set_vertex_bytes(
                 1,
@@ -1228,11 +1466,28 @@ mod platform {
         }
     }
 
+    fn linear_srgb_color(color: Color) -> [f32; 4] {
+        [
+            linear_srgb_channel(color.r),
+            linear_srgb_channel(color.g),
+            linear_srgb_channel(color.b),
+            color.a,
+        ]
+    }
+
+    fn linear_srgb_channel(channel: f32) -> f32 {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
     fn primitive_pipeline(
         renderer: &MetalRenderer,
         format: MTLPixelFormat,
     ) -> &RenderPipelineState {
-        if format == MTLPixelFormat::RGBA8Unorm {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
             &renderer.rgba_pipeline
         } else {
             &renderer.bgra_pipeline
@@ -1240,7 +1495,7 @@ mod platform {
     }
 
     fn border_pipeline(renderer: &MetalRenderer, format: MTLPixelFormat) -> &RenderPipelineState {
-        if format == MTLPixelFormat::RGBA8Unorm {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
             &renderer.rgba_border_pipeline
         } else {
             &renderer.bgra_border_pipeline
@@ -1248,18 +1503,51 @@ mod platform {
     }
 
     fn image_pipeline(renderer: &MetalRenderer, format: MTLPixelFormat) -> &RenderPipelineState {
-        if format == MTLPixelFormat::RGBA8Unorm {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
             &renderer.rgba_image_pipeline
         } else {
             &renderer.bgra_image_pipeline
         }
     }
 
+    fn downsample_pipeline(
+        renderer: &MetalRenderer,
+        format: MTLPixelFormat,
+    ) -> &RenderPipelineState {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
+            &renderer.rgba_downsample_pipeline
+        } else {
+            &renderer.bgra_downsample_pipeline
+        }
+    }
+
     fn blur_pipeline(renderer: &MetalRenderer, format: MTLPixelFormat) -> &RenderPipelineState {
-        if format == MTLPixelFormat::RGBA8Unorm {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
             &renderer.rgba_blur_pipeline
         } else {
             &renderer.bgra_blur_pipeline
+        }
+    }
+
+    fn filter_composite_pipeline(
+        renderer: &MetalRenderer,
+        format: MTLPixelFormat,
+    ) -> &RenderPipelineState {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
+            &renderer.rgba_filter_composite_pipeline
+        } else {
+            &renderer.bgra_filter_composite_pipeline
+        }
+    }
+
+    fn filter_blur_pipeline(
+        renderer: &MetalRenderer,
+        format: MTLPixelFormat,
+    ) -> &RenderPipelineState {
+        if format == MTLPixelFormat::RGBA8Unorm_sRGB {
+            &renderer.rgba_filter_blur_pipeline
+        } else {
+            &renderer.bgra_filter_blur_pipeline
         }
     }
 
@@ -1297,6 +1585,12 @@ mod platform {
             .saturating_add(slot.blur.as_ref().map_or(0, |textures| {
                 texture_bytes(&textures.first).saturating_add(texture_bytes(&textures.second))
             }))
+            .saturating_add(
+                slot.filter_layers
+                    .iter()
+                    .map(|texture| texture_bytes(texture))
+                    .sum::<usize>(),
+            )
     }
 
     fn texture_bytes(texture: &TextureRef) -> usize {
@@ -1325,26 +1619,95 @@ mod platform {
             .saturating_mul(4)
     }
 
-    fn largest_scratch_size(
-        scene: &Scene,
-        surface: SurfaceSize,
-        scale: f32,
-    ) -> Option<SurfaceSize> {
-        scene
-            .commands()
-            .iter()
-            .filter_map(|command| blur_plan(command, surface, scale))
-            .map(|plan| plan.scratch_size)
-            .reduce(|left, right| SurfaceSize {
-                width: left.width.max(right.width),
-                height: left.height.max(right.height),
-            })
+    #[derive(Default)]
+    struct CompositorRequirements {
+        scratch_size: Option<SurfaceSize>,
+        backdrop_blur_count: usize,
+        filter_blur_count: usize,
+        filter_layer_depth: usize,
     }
 
-    fn compositor_plan_bytes(surface: SurfaceSize, scratch: Option<SurfaceSize>) -> usize {
-        surface_bytes(surface).saturating_add(scratch.map_or(0, |scratch_size| {
-            surface_bytes(scratch_size).saturating_mul(2)
-        }))
+    fn compositor_requirements(
+        commands: &[DrawCommand],
+        surface: SurfaceSize,
+        scale: f32,
+    ) -> Result<CompositorRequirements, RenderError> {
+        let mut requirements = CompositorRequirements::default();
+        collect_compositor_requirements(commands, surface, scale, 0, &mut requirements)?;
+        Ok(requirements)
+    }
+
+    fn collect_compositor_requirements(
+        commands: &[DrawCommand],
+        surface: SurfaceSize,
+        scale: f32,
+        filter_depth: usize,
+        requirements: &mut CompositorRequirements,
+    ) -> Result<(), RenderError> {
+        for command in commands {
+            match command {
+                DrawCommand::BackdropBlur { .. } => {
+                    requirements.backdrop_blur_count =
+                        requirements.backdrop_blur_count.saturating_add(1);
+                    if let Some(plan) = blur_plan(command, surface, scale) {
+                        include_scratch_size(requirements, plan.scratch_size);
+                    }
+                }
+                DrawCommand::FilterBlur {
+                    sigma, commands, ..
+                } => {
+                    requirements.filter_blur_count =
+                        requirements.filter_blur_count.saturating_add(1);
+                    let plan = filter_blur_plan(*sigma, surface, scale);
+                    let nested_depth = if let Some(plan) = plan {
+                        let nested_depth = filter_depth.saturating_add(1);
+                        if nested_depth > MAX_FILTER_BLUR_DEPTH {
+                            return Err(RenderError::FilterBlurNestingTooDeep);
+                        }
+                        requirements.filter_layer_depth =
+                            requirements.filter_layer_depth.max(nested_depth);
+                        include_scratch_size(requirements, plan.scratch_size);
+                        nested_depth
+                    } else {
+                        filter_depth
+                    };
+                    collect_compositor_requirements(
+                        commands,
+                        surface,
+                        scale,
+                        nested_depth,
+                        requirements,
+                    )?;
+                }
+                DrawCommand::SolidQuad { .. }
+                | DrawCommand::RoundedQuad { .. }
+                | DrawCommand::RoundedBorder { .. }
+                | DrawCommand::Glyphs { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn include_scratch_size(requirements: &mut CompositorRequirements, scratch_size: SurfaceSize) {
+        requirements.scratch_size = Some(requirements.scratch_size.map_or(
+            scratch_size,
+            |current| SurfaceSize {
+                width: current.width.max(scratch_size.width),
+                height: current.height.max(scratch_size.height),
+            },
+        ));
+    }
+
+    fn compositor_plan_bytes(
+        surface: SurfaceSize,
+        scratch: Option<SurfaceSize>,
+        filter_layer_depth: usize,
+    ) -> usize {
+        surface_bytes(surface)
+            .saturating_add(scratch.map_or(0, |scratch_size| {
+                surface_bytes(scratch_size).saturating_mul(2)
+            }))
+            .saturating_add(surface_bytes(surface).saturating_mul(filter_layer_depth))
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1388,6 +1751,22 @@ mod platform {
             anmixiu_scene::Point::new(min_x, min_y),
             anmixiu_scene::Size::new(max_x - min_x, max_y - min_y),
         );
+        downsampled_blur_plan(sample_bounds, physical_sigma)
+    }
+
+    fn filter_blur_plan(sigma: f32, surface: SurfaceSize, scale: f32) -> Option<BlurPlan> {
+        if !sigma.is_finite() || sigma <= 0.0 {
+            return None;
+        }
+        let sample_bounds = Rect::new(
+            anmixiu_scene::Point::new(0.0, 0.0),
+            anmixiu_scene::Size::new(surface.width as f32, surface.height as f32),
+        );
+        downsampled_blur_plan(sample_bounds, sigma.min(MAX_FILTER_BLUR_SIGMA) * scale)
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn downsampled_blur_plan(sample_bounds: Rect, physical_sigma: f32) -> Option<BlurPlan> {
         let mut downsample = 1_u32;
         while physical_sigma / downsample as f32 > TARGET_DOWNSAMPLED_SIGMA
             && downsample < MAX_DOWNSAMPLE
@@ -1404,6 +1783,7 @@ mod platform {
         Some(BlurPlan {
             sample_bounds,
             scratch_size,
+            downsample,
             effective_sigma: physical_sigma / downsample as f32,
         })
     }
@@ -1421,6 +1801,31 @@ mod platform {
             rect.origin.y / surface.height as f32,
             rect.size.width / surface.width as f32,
             rect.size.height / surface.height as f32,
+        ]
+    }
+
+    fn normalized_texel_bounds(rect: Rect, texture_size: SurfaceSize) -> [f32; 4] {
+        [
+            (rect.min_x() + 0.5) / texture_size.width as f32,
+            (rect.min_y() + 0.5) / texture_size.height as f32,
+            (rect.max_x() - 0.5) / texture_size.width as f32,
+            (rect.max_y() - 0.5) / texture_size.height as f32,
+        ]
+    }
+
+    fn rect_fills_surface(rect: Rect, surface: SurfaceSize) -> bool {
+        rect.min_x() <= 0.0
+            && rect.min_y() <= 0.0
+            && rect.max_x() >= surface.width as f32
+            && rect.max_y() >= surface.height as f32
+    }
+
+    fn content_texel_bounds(content_size: SurfaceSize, texture_size: SurfaceSize) -> [f32; 4] {
+        [
+            0.5 / texture_size.width as f32,
+            0.5 / texture_size.height as f32,
+            (content_size.width as f32 - 0.5) / texture_size.width as f32,
+            (content_size.height as f32 - 0.5) / texture_size.height as f32,
         ]
     }
 
@@ -1459,6 +1864,7 @@ mod platform {
             clip_rect,
             misc: [corner_radius.max(0.0) * scale, clip_radius, 0.0, has_clip],
             uv_rect,
+            sample_uv_bounds: [0.0, 0.0, 1.0, 1.0],
         }
     }
 
@@ -1477,13 +1883,19 @@ mod platform {
                 content_size.height as f32,
             ],
             clip_rect: [0.0; 4],
-            misc: [sigma, direction[0], direction[1], 0.0],
+            misc: [
+                sigma,
+                direction[0],
+                direction[1],
+                f32::from(content_size != texture_size),
+            ],
             uv_rect: [
                 0.0,
                 0.0,
                 content_size.width as f32 / texture_size.width as f32,
                 content_size.height as f32 / texture_size.height as f32,
             ],
+            sample_uv_bounds: content_texel_bounds(content_size, texture_size),
         }
     }
 
@@ -1510,13 +1922,24 @@ mod platform {
         let image = library
             .get_function("image_fragment", None)
             .map_err(RenderError::ShaderCompilation)?;
+        let downsample = library
+            .get_function("downsample_fragment", None)
+            .map_err(RenderError::ShaderCompilation)?;
         let blur = library
             .get_function("blur_fragment", None)
+            .map_err(RenderError::ShaderCompilation)?;
+        let filter_blur = library
+            .get_function("filter_blur_fragment", None)
             .map_err(RenderError::ShaderCompilation)?;
         let (rgba, bgra) = pipeline_pair(device, vertex, &gui, true)?;
         let (rgba_border, bgra_border) = pipeline_pair(device, vertex, &border, true)?;
         let (rgba_image, bgra_image) = pipeline_pair(device, vertex, &image, false)?;
+        let (rgba_downsample, bgra_downsample) = pipeline_pair(device, vertex, &downsample, false)?;
         let (rgba_blur, bgra_blur) = pipeline_pair(device, vertex, &blur, false)?;
+        let (rgba_filter_blur, bgra_filter_blur) =
+            pipeline_pair(device, vertex, &filter_blur, false)?;
+        let (rgba_filter_composite, bgra_filter_composite) =
+            premultiplied_pipeline_pair(device, vertex, &image)?;
         Ok(RendererPipelines {
             rgba,
             bgra,
@@ -1524,8 +1947,14 @@ mod platform {
             bgra_border,
             rgba_image,
             bgra_image,
+            rgba_downsample,
+            bgra_downsample,
             rgba_blur,
             bgra_blur,
+            rgba_filter_blur,
+            bgra_filter_blur,
+            rgba_filter_composite,
+            bgra_filter_composite,
         })
     }
 
@@ -1540,15 +1969,38 @@ mod platform {
                 device,
                 vertex,
                 fragment,
-                MTLPixelFormat::RGBA8Unorm,
-                blending,
+                MTLPixelFormat::RGBA8Unorm_sRGB,
+                blending.then_some(metal::MTLBlendFactor::SourceAlpha),
             )?,
             pipeline(
                 device,
                 vertex,
                 fragment,
-                MTLPixelFormat::BGRA8Unorm,
-                blending,
+                MTLPixelFormat::BGRA8Unorm_sRGB,
+                blending.then_some(metal::MTLBlendFactor::SourceAlpha),
+            )?,
+        ))
+    }
+
+    fn premultiplied_pipeline_pair(
+        device: &metal::DeviceRef,
+        vertex: &metal::FunctionRef,
+        fragment: &metal::FunctionRef,
+    ) -> Result<(RenderPipelineState, RenderPipelineState), RenderError> {
+        Ok((
+            pipeline(
+                device,
+                vertex,
+                fragment,
+                MTLPixelFormat::RGBA8Unorm_sRGB,
+                Some(metal::MTLBlendFactor::One),
+            )?,
+            pipeline(
+                device,
+                vertex,
+                fragment,
+                MTLPixelFormat::BGRA8Unorm_sRGB,
+                Some(metal::MTLBlendFactor::One),
             )?,
         ))
     }
@@ -1558,7 +2010,7 @@ mod platform {
         vertex: &metal::FunctionRef,
         fragment: &metal::FunctionRef,
         format: MTLPixelFormat,
-        blending: bool,
+        source_rgb_blend_factor: Option<metal::MTLBlendFactor>,
     ) -> Result<RenderPipelineState, RenderError> {
         let descriptor = RenderPipelineDescriptor::new();
         descriptor.set_vertex_function(Some(vertex));
@@ -1568,11 +2020,11 @@ mod platform {
             .object_at(0)
             .expect("Metal color attachment zero exists");
         attachment.set_pixel_format(format);
-        attachment.set_blending_enabled(blending);
-        if blending {
+        attachment.set_blending_enabled(source_rgb_blend_factor.is_some());
+        if let Some(source_rgb_blend_factor) = source_rgb_blend_factor {
             attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
             attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-            attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
+            attachment.set_source_rgb_blend_factor(source_rgb_blend_factor);
             attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
             attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
             attachment
@@ -1588,7 +2040,7 @@ mod platform {
         use anmixiu_scene::{DrawCommand, Point, Rect, Scene, Size};
 
         use super::{
-            COMPOSITOR_TEXTURE_BUDGET, SurfaceSize, compositor_plan_bytes, largest_scratch_size,
+            COMPOSITOR_TEXTURE_BUDGET, SurfaceSize, compositor_plan_bytes, compositor_requirements,
         };
 
         #[test]
@@ -1604,9 +2056,15 @@ mod platform {
                 Vec::new(),
                 Vec::new(),
             );
-            let scratch = largest_scratch_size(&scene, surface, 1.0);
+            let requirements = compositor_requirements(scene.commands(), surface, 1.0).unwrap();
 
-            assert!(compositor_plan_bytes(surface, scratch) > COMPOSITOR_TEXTURE_BUDGET);
+            assert!(
+                compositor_plan_bytes(
+                    surface,
+                    requirements.scratch_size,
+                    requirements.filter_layer_depth,
+                ) > COMPOSITOR_TEXTURE_BUDGET
+            );
         }
     }
 }

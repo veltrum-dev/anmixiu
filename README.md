@@ -82,9 +82,20 @@ div()
     .rounded(12.0)
 ```
 
-Portable renderers clamp sigma to 64 logical pixels. Scenes without backdrop effects retain the
+Ordinary filter blur isolates the element's own background, border, text, and descendants, blurs
+that layer, and composites it over the unchanged backdrop:
+
+```rust
+div()
+    .filter_blur(10.0)
+    .child(text("Blurred together"))
+```
+
+Portable renderers clamp sigma to 64 logical pixels. Scenes without blur effects retain the
 direct-to-surface fast path and allocate no compositor textures. Blur scenes use bounded reusable
-intermediate textures; smaller effect bounds and static backdrops remain the most efficient usage.
+intermediate textures. Filter groups support up to eight nested layers and remain inside the shared
+256 MiB compositor budget; smaller backdrop-filter bounds and static backdrops remain the most
+efficient backdrop-filter usage.
 
 Run the interactive comparison example and toggle the effect on and off:
 

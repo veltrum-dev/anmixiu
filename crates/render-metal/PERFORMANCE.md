@@ -32,6 +32,7 @@ presentation.
 | 256×256 direct, one quad | 411.29–421.70 µs |
 | 256×256 direct, 1,000 quads | 865.90–894.75 µs |
 | 256×256 backdrop blur, sigma 16 | 738.97–760.19 µs |
+| 256×256 subtree filter blur, sigma 10 | 815.54–902.44 µs |
 | 600×400 logical at 2x, direct | 1.839–1.906 ms |
 | 600×400 logical at 2x, full-region backdrop blur, sigma 16 | 2.024–2.185 ms |
 
@@ -45,3 +46,7 @@ and 26,214,400 allocated bytes, all from the explicit RGBA readback vector, with
 deallocations and no reallocations. The compositor added no per-frame CPU heap allocation after
 warm-up and retained 393,216 bytes of bounded scene/scratch textures. Scenes without effects
 reported zero retained compositor bytes.
+
+The corresponding 100-iteration subtree-filter probe also recorded exactly the 100 explicit
+readback allocations and no additional per-frame CPU allocation. One 256×256 filtered layer
+retained 655,360 bytes across the bounded scene, scratch pair, and isolated content layer.

@@ -977,6 +977,129 @@ struct DebugSelection<'a> {
     previewed_node: Option<u64>,
 }
 
+struct SceneEmitter<'a> {
+    nodes: &'a HashMap<LayoutNodeId, &'a ProjectedNode>,
+    layout: &'a LayoutTree,
+    shaped: &'a HashMap<MeasureId, ShapedText>,
+    hovered: Option<&'a HoverTarget>,
+    focused: Option<&'a GlobalElementId>,
+    hits: &'a mut Vec<HitRegion>,
+}
+
+impl SceneEmitter<'_> {
+    fn emit_node(&mut self, id: LayoutNodeId, commands: &mut Vec<DrawCommand>) {
+        let children = self
+            .layout
+            .get(id)
+            .map(|layout_box| layout_box.children.clone())
+            .unwrap_or_default();
+        let Some(node) = self.nodes.get(&id).copied() else {
+            for child in children.iter().copied() {
+                self.emit_node(child, commands);
+            }
+            return;
+        };
+        let Some(raw_bounds) = self.layout.bounds(id) else {
+            for child in children.iter().copied() {
+                self.emit_node(child, commands);
+            }
+            return;
+        };
+        let (offset_x, offset_y, scroll_clip) = scroll_transform(id, self.nodes, self.layout);
+        let scroll_offset = Point::new(offset_x, offset_y);
+        let bounds = if offset_x == 0.0 && offset_y == 0.0 {
+            raw_bounds
+        } else {
+            Rect::new(
+                Point::new(
+                    raw_bounds.origin.x - offset_x,
+                    raw_bounds.origin.y - offset_y,
+                ),
+                raw_bounds.size,
+            )
+        };
+        let hover_style = if self
+            .hovered
+            .is_some_and(|hovered| hovered.matches(HitId(node.id.0), node.global_id.as_ref()))
+        {
+            node.hover_style.as_ref().map(|refinement| {
+                let mut style = node.style.clone();
+                refinement.apply_to(&mut style);
+                style
+            })
+        } else {
+            None
+        };
+        let paint_style = hover_style.as_ref().unwrap_or(&node.style);
+        let sigma = filter_sigma(paint_style);
+        let mut filtered_commands = sigma.map(|_| Vec::new());
+        {
+            let target = filtered_commands.as_mut().unwrap_or(commands);
+            self.emit_node_paint(
+                node,
+                bounds,
+                scroll_clip,
+                paint_style,
+                scroll_offset,
+                target,
+            );
+            for child in children.iter().copied() {
+                self.emit_node(child, target);
+            }
+        }
+        if let (Some(sigma), Some(filtered_commands)) = (sigma, filtered_commands) {
+            commands.push(DrawCommand::FilterBlur {
+                sigma,
+                clip: scroll_clip.map(Clip::rectangular),
+                commands: filtered_commands.into(),
+            });
+        }
+    }
+
+    fn emit_node_paint(
+        &mut self,
+        node: &ProjectedNode,
+        bounds: Rect,
+        scroll_clip: Option<Rect>,
+        paint_style: &Style,
+        scroll_offset: Point,
+        commands: &mut Vec<DrawCommand>,
+    ) {
+        let self_clip = Clip::rounded(bounds, paint_style.border_radius.value());
+        let clip = scroll_clip.map_or(self_clip, |viewport| {
+            Clip::rectangular(self_clip.bounds.intersection(viewport).unwrap_or(viewport))
+        });
+        if let Some(sigma) = backdrop_sigma(paint_style) {
+            commands.push(DrawCommand::BackdropBlur {
+                bounds,
+                sigma,
+                corner_radius: paint_style.border_radius.value().max(0.0),
+                clip: scroll_clip.map(Clip::rectangular),
+            });
+        }
+        push_box_commands_clipped(commands, bounds, paint_style, scroll_clip);
+        if let Some(shape) = self.shaped.get(&MeasureId(node.id.0)) {
+            let glyphs = if scroll_offset.x == 0.0 && scroll_offset.y == 0.0 {
+                shape.glyphs.clone()
+            } else {
+                translate_shape(shape, Point::new(-scroll_offset.x, -scroll_offset.y)).glyphs
+            };
+            commands.push(DrawCommand::Glyphs {
+                glyphs,
+                color: scene_color(paint_style.foreground.unwrap_or(CoreColor::BLACK)),
+                clip: Some(clip),
+            });
+        }
+        if node.clickable || node.hoverable {
+            self.hits
+                .push(HitRegion::new(HitId(node.id.0), bounds, Some(clip)));
+        }
+        if node.global_id.as_ref() == self.focused {
+            push_focus_outline(commands, bounds, paint_style);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_scene(
     nodes: &[ProjectedNode],
@@ -990,72 +1113,15 @@ fn build_scene(
     let by_id: HashMap<_, _> = nodes.iter().map(|node| (node.id, node)).collect();
     let mut commands = Vec::new();
     let mut hits = Vec::new();
-    for id in layout.paint_order() {
-        let Some(node) = by_id.get(id).copied() else {
-            continue;
-        };
-        let Some(raw_bounds) = layout.bounds(*id) else {
-            continue;
-        };
-        // Shift this node by the offset of every scroll-container ancestor, and clip it to the
-        // nearest scroll viewport. Nodes outside any scroll container are unaffected.
-        let (offset_x, offset_y, scroll_clip) = scroll_transform(*id, &by_id, layout);
-        let bounds = if offset_x == 0.0 && offset_y == 0.0 {
-            raw_bounds
-        } else {
-            Rect::new(
-                Point::new(
-                    raw_bounds.origin.x - offset_x,
-                    raw_bounds.origin.y - offset_y,
-                ),
-                raw_bounds.size,
-            )
-        };
-        let hover_style = if hovered
-            .is_some_and(|hovered| hovered.matches(HitId(node.id.0), node.global_id.as_ref()))
-        {
-            node.hover_style.as_ref().map(|refinement| {
-                let mut style = node.style.clone();
-                refinement.apply_to(&mut style);
-                style
-            })
-        } else {
-            None
-        };
-        let paint_style = hover_style.as_ref().unwrap_or(&node.style);
-        // Combine the element's own rounded clip with any scroll-viewport clip.
-        let self_clip = Clip::rounded(bounds, paint_style.border_radius.value());
-        let clip = scroll_clip.map_or(self_clip, |viewport| {
-            Clip::rectangular(self_clip.bounds.intersection(viewport).unwrap_or(viewport))
-        });
-        if let Some(sigma) = backdrop_sigma(paint_style) {
-            commands.push(DrawCommand::BackdropBlur {
-                bounds,
-                sigma,
-                corner_radius: paint_style.border_radius.value().max(0.0),
-                clip: scroll_clip.map(Clip::rectangular),
-            });
-        }
-        push_box_commands_clipped(&mut commands, bounds, paint_style, scroll_clip);
-        if let Some(shape) = shaped.get(&MeasureId(id.0)) {
-            let glyphs = if offset_x == 0.0 && offset_y == 0.0 {
-                shape.glyphs.clone()
-            } else {
-                translate_shape(shape, Point::new(-offset_x, -offset_y)).glyphs
-            };
-            commands.push(DrawCommand::Glyphs {
-                glyphs,
-                color: scene_color(paint_style.foreground.unwrap_or(CoreColor::BLACK)),
-                clip: Some(clip),
-            });
-        }
-        if node.clickable || node.hoverable {
-            hits.push(HitRegion::new(HitId(id.0), bounds, Some(clip)));
-        }
-        if node.global_id.as_ref() == focused {
-            push_focus_outline(&mut commands, bounds, paint_style);
-        }
+    SceneEmitter {
+        nodes: &by_id,
+        layout,
+        shaped,
+        hovered,
+        focused,
+        hits: &mut hits,
     }
+    .emit_node(layout.root(), &mut commands);
     let preview_color = Color {
         r: 0.15,
         g: 0.75,
@@ -1451,6 +1517,10 @@ fn hash_style(style_value: &Style, style: &mut DefaultHasher, paint: &mut Defaul
         0xB10B_u16.hash(paint);
         sigma.to_bits().hash(paint);
     }
+    if let Some(sigma) = filter_sigma(style_value) {
+        0xF17E_u16.hash(paint);
+        sigma.to_bits().hash(paint);
+    }
     style_value
         .foreground
         .map(|color| {
@@ -1490,6 +1560,13 @@ fn hash_style(style_value: &Style, style: &mut DefaultHasher, paint: &mut Defaul
 fn backdrop_sigma(style: &Style) -> Option<f32> {
     style
         .backdrop_blur
+        .map(CorePixels::value)
+        .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
+}
+
+fn filter_sigma(style: &Style) -> Option<f32> {
+    style
+        .filter_blur
         .map(CorePixels::value)
         .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
 }

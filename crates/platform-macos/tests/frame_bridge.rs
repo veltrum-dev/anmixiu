@@ -151,6 +151,75 @@ fn backdrop_blur_is_emitted_after_the_backdrop_and_before_the_element_fill() {
 }
 
 #[test]
+fn filter_blur_wraps_the_element_and_its_descendants_but_not_its_backdrop() {
+    let element = div()
+        .background(Color::rgb(1.0, 0.0, 0.0))
+        .child(
+            div()
+                .width(80.0)
+                .height(40.0)
+                .filter_blur(10.0)
+                .background(Color::WHITE)
+                .child(div().width(20.0).height(10.0).background(Color::BLACK)),
+        )
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let frame = builder
+        .build(&element, Size::new(160.0, 80.0), 2.0)
+        .unwrap();
+
+    assert!(matches!(
+        frame.scene.commands(),
+        [
+            DrawCommand::SolidQuad { .. },
+            DrawCommand::FilterBlur {
+                sigma,
+                commands,
+                ..
+            }
+        ] if (*sigma - 10.0).abs() < f32::EPSILON
+            && matches!(commands.as_ref(), [
+                DrawCommand::SolidQuad { .. },
+                DrawCommand::SolidQuad { .. }
+            ])
+    ));
+    assert!(frame.scene.requires_compositing());
+}
+
+#[test]
+fn changing_only_filter_blur_reuses_layout_and_invalidates_scene_paint() {
+    let plain = div()
+        .child(div().width(80.0).height(40.0))
+        .into_element_node();
+    let blurred = div()
+        .child(div().width(80.0).height(40.0).filter_blur(10.0))
+        .into_element_node();
+    let mut builder = FrameBuilder::new().unwrap();
+    let first = builder.build(&plain, Size::new(160.0, 80.0), 2.0).unwrap();
+    let layout_misses = builder.layout_cache_stats().misses;
+    let second = builder
+        .build(&blurred, Size::new(160.0, 80.0), 2.0)
+        .unwrap();
+
+    assert_eq!(builder.layout_cache_stats().misses, layout_misses);
+    assert_eq!(first.layout, second.layout);
+    assert_ne!(first.scene, second.scene);
+}
+
+#[test]
+fn non_positive_and_non_finite_filter_blurs_emit_no_effect() {
+    let mut builder = FrameBuilder::new().unwrap();
+    for sigma in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let element = div().filter_blur(sigma).into_element_node();
+        let frame = builder.build(&element, Size::new(80.0, 40.0), 1.0).unwrap();
+        assert!(
+            !frame.scene.requires_compositing(),
+            "invalid sigma {sigma:?} must keep the direct renderer path"
+        );
+    }
+}
+
+#[test]
 fn changing_only_backdrop_blur_reuses_layout_and_invalidates_scene_paint() {
     let plain = div()
         .child(div().width(80.0).height(40.0))

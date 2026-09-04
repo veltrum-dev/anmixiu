@@ -32,6 +32,7 @@ impl From<u32> for Pixels {
     }
 }
 
+/// An sRGB color with normalized, transfer-encoded RGB channels and a linear alpha channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub red: f32,
@@ -154,6 +155,8 @@ pub struct Style {
     pub background: Color,
     /// Gaussian backdrop-filter sigma in logical pixels.
     pub backdrop_blur: Option<Pixels>,
+    /// Gaussian filter sigma applied to this element and its descendants, in logical pixels.
+    pub filter_blur: Option<Pixels>,
     pub foreground: Option<Color>,
     pub border_width: Pixels,
     pub border_color: Color,
@@ -182,6 +185,7 @@ impl Default for Style {
             justify_content: JustifyContent::Start,
             background: Color::TRANSPARENT,
             backdrop_blur: None,
+            filter_blur: None,
             foreground: None,
             border_width: px(0.0),
             border_color: Color::TRANSPARENT,
@@ -296,6 +300,18 @@ pub trait Styled: Sized {
     #[must_use]
     fn backdrop_blur(mut self, sigma: impl Into<Pixels>) -> Self {
         self.style().backdrop_blur = Some(sigma.into());
+        self
+    }
+
+    /// Applies a Gaussian filter to this element's painted content and descendants.
+    ///
+    /// Unlike [`backdrop_blur`](Self::backdrop_blur), this never samples content behind the
+    /// element. The sigma is measured in logical pixels. Non-positive and non-finite values are
+    /// retained in the style but produce no scene effect; platform renderers clamp larger finite
+    /// values to 64 logical pixels.
+    #[must_use]
+    fn filter_blur(mut self, sigma: impl Into<Pixels>) -> Self {
+        self.style().filter_blur = Some(sigma.into());
         self
     }
 

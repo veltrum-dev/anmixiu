@@ -116,6 +116,28 @@ fn scene_reports_whether_ordered_backdrop_effects_require_compositing() {
 }
 
 #[test]
+fn filter_blur_owns_its_subtree_commands_and_requires_compositing() {
+    let child = DrawCommand::SolidQuad {
+        bounds: rect(2.0, 3.0, 4.0, 5.0),
+        color: Color::WHITE,
+        clip: None,
+    };
+    let command = DrawCommand::FilterBlur {
+        sigma: 10.0,
+        clip: Some(Clip::rectangular(rect(0.0, 0.0, 20.0, 20.0))),
+        commands: Arc::from([child.clone()]),
+    };
+    let scene = Scene::new(vec![command.clone()], Vec::new(), Vec::new());
+
+    assert_eq!(scene.commands(), &[command]);
+    let DrawCommand::FilterBlur { commands, .. } = &scene.commands()[0] else {
+        panic!("filter command preserved");
+    };
+    assert_eq!(commands.as_ref(), &[child]);
+    assert!(scene.requires_compositing());
+}
+
+#[test]
 fn invalid_atlas_upload_is_rejected() {
     let error = AtlasUpload::new(AtlasId(1), 1, PixelSize::new(3, 2), Arc::from([0_u8; 5]))
         .expect_err("R8 page must have width * height bytes");

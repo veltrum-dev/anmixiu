@@ -8,7 +8,7 @@ use anmixiu_scene::{
 };
 use anmixiu_text_coretext::{AtlasConfig, FontSpec, TextSystem};
 use core_graphics::geometry::CGSize;
-use metal::MetalLayer;
+use metal::{MTLPixelFormat, MetalLayer};
 
 fn scene_with(command: DrawCommand) -> Scene {
     Scene::new(vec![command], Vec::new(), Vec::new())
@@ -38,6 +38,31 @@ fn offscreen_solid_quad_can_be_read_back() {
     assert_eq!(renderer.stats().submitted_frames, 1);
     assert_eq!(renderer.stats().composited_frames, 0);
     assert_eq!(renderer.stats().compositor_texture_bytes, 0);
+}
+
+#[test]
+fn offscreen_srgb_color_preserves_encoded_components() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = scene_with(DrawCommand::SolidQuad {
+        bounds: rect(0.0, 0.0, 4.0, 4.0),
+        color: Color::rgba(0.25, 0.5, 0.75, 1.0),
+        clip: None,
+    });
+
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(4, 4).unwrap())
+        .unwrap();
+
+    let pixel = image.pixel_rgba(2, 2);
+    for (actual, expected) in pixel.into_iter().zip([64_u8, 128, 191, 255]) {
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "sRGB round-trip changed {expected} to {actual}"
+        );
+    }
 }
 
 #[test]
@@ -157,6 +182,286 @@ fn backdrop_blur_mixes_preceding_pixels_without_affecting_pixels_outside_its_bou
         compositor_bytes,
         "steady-state rendering reuses the bounded texture slot"
     );
+}
+
+#[test]
+fn backdrop_blur_averages_srgb_backdrops_in_linear_light() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let mut commands = (0_u16..64)
+        .map(|x| DrawCommand::SolidQuad {
+            bounds: rect(f32::from(x), 0.0, 1.0, 16.0),
+            color: if x % 2 == 0 {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            },
+            clip: None,
+        })
+        .collect::<Vec<_>>();
+    commands.push(DrawCommand::BackdropBlur {
+        bounds: rect(0.0, 0.0, 64.0, 16.0),
+        sigma: 3.0,
+        corner_radius: 0.0,
+        clip: None,
+    });
+
+    let image = renderer
+        .render_offscreen(
+            &Scene::new(commands, Vec::new(), Vec::new()),
+            SurfaceSize::new(64, 16).unwrap(),
+        )
+        .unwrap();
+
+    let pixel = image.pixel_rgba(32, 8);
+    assert!(
+        (180..=195).contains(&pixel[0]),
+        "equal black/white energy should encode near sRGB 0.735: {pixel:?}"
+    );
+    assert_eq!(pixel[0], pixel[1]);
+    assert_eq!(pixel[1], pixel[2]);
+    assert_eq!(pixel[3], 255);
+}
+
+#[test]
+fn large_backdrop_downsample_prefilters_the_complete_source_footprint() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let mut commands = (0_u16..128)
+        .map(|x| DrawCommand::SolidQuad {
+            bounds: rect(f32::from(x) / 2.0, 0.0, 0.5, 16.0),
+            color: if matches!(x % 16, 7 | 8) {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            },
+            clip: None,
+        })
+        .collect::<Vec<_>>();
+    commands.push(DrawCommand::BackdropBlur {
+        bounds: rect(0.0, 0.0, 64.0, 16.0),
+        sigma: 64.0,
+        corner_radius: 0.0,
+        clip: None,
+    });
+
+    let image = renderer
+        .render_offscreen_scaled(
+            &Scene::new(commands, Vec::new(), Vec::new()),
+            SurfaceSize::new(128, 32).unwrap(),
+            2.0,
+        )
+        .unwrap();
+
+    let pixel = image.pixel_rgba(64, 16);
+    assert!(
+        (230..=250).contains(&pixel[0]),
+        "fourteen white texels out of every sixteen should survive prefiltering: {pixel:?}"
+    );
+    assert_eq!(pixel[0], pixel[1]);
+    assert_eq!(pixel[1], pixel[2]);
+    assert_eq!(pixel[3], 255);
+}
+
+#[test]
+fn shared_scratch_clamps_each_blur_to_its_logical_right_and_bottom_edges() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = Scene::new(
+        vec![
+            DrawCommand::SolidQuad {
+                bounds: rect(0.0, 0.0, 64.0, 64.0),
+                color: Color::WHITE,
+                clip: None,
+            },
+            DrawCommand::BackdropBlur {
+                bounds: rect(56.0, 56.0, 8.0, 8.0),
+                sigma: 3.0,
+                corner_radius: 0.0,
+                clip: None,
+            },
+            DrawCommand::BackdropBlur {
+                bounds: rect(0.0, 0.0, 32.0, 32.0),
+                sigma: 1.0,
+                corner_radius: 0.0,
+                clip: None,
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(64, 64).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        image.pixel_rgba(63, 63),
+        [255, 255, 255, 255],
+        "a smaller shared-scratch region must extend its own last texel"
+    );
+}
+
+#[test]
+fn filter_blur_blurs_only_its_own_layer_and_spreads_beyond_its_content() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = Scene::new(
+        vec![
+            DrawCommand::SolidQuad {
+                bounds: rect(0.0, 0.0, 16.0, 16.0),
+                color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::SolidQuad {
+                bounds: rect(16.0, 0.0, 16.0, 16.0),
+                color: Color::rgba(0.0, 0.0, 1.0, 1.0),
+                clip: None,
+            },
+            DrawCommand::FilterBlur {
+                sigma: 2.0,
+                clip: None,
+                commands: Arc::from([DrawCommand::SolidQuad {
+                    bounds: rect(2.0, 8.0, 6.0, 6.0),
+                    color: Color::rgba(0.0, 1.0, 0.0, 1.0),
+                    clip: None,
+                }]),
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(32, 16).unwrap())
+        .unwrap();
+
+    assert_eq!(image.pixel_rgba(15, 2), [255, 0, 0, 255]);
+    assert_eq!(image.pixel_rgba(16, 2), [0, 0, 255, 255]);
+    let spread = image.pixel_rgba(1, 11);
+    assert!(
+        spread[0] > 0 && spread[1] > 0,
+        "filtered content should spread over, not replace, the red backdrop: {spread:?}"
+    );
+    assert_eq!(spread[2], 0);
+    assert_eq!(spread[3], 255);
+    assert_eq!(image.pixel_rgba(24, 12), [0, 0, 255, 255]);
+    assert_eq!(renderer.stats().filter_blur_operations, 1);
+    assert_eq!(renderer.stats().compositor_texture_bytes, 32 * 16 * 4 * 4);
+}
+
+#[test]
+fn filter_blur_rejects_unbounded_counts_and_nesting_before_allocating() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let filter = || DrawCommand::FilterBlur {
+        sigma: 1.0,
+        clip: None,
+        commands: Arc::from([]),
+    };
+    let too_many = Scene::new((0..65).map(|_| filter()).collect(), Vec::new(), Vec::new());
+    assert_eq!(
+        renderer
+            .render_offscreen(&too_many, SurfaceSize::new(8, 8).unwrap())
+            .unwrap_err(),
+        anmixiu_render_metal::RenderError::TooManyFilterBlurs
+    );
+
+    let mut nested = DrawCommand::SolidQuad {
+        bounds: rect(0.0, 0.0, 1.0, 1.0),
+        color: Color::WHITE,
+        clip: None,
+    };
+    for _ in 0..9 {
+        nested = DrawCommand::FilterBlur {
+            sigma: 1.0,
+            clip: None,
+            commands: Arc::from([nested]),
+        };
+    }
+    let too_deep = scene_with(nested);
+    assert_eq!(
+        renderer
+            .render_offscreen(&too_deep, SurfaceSize::new(8, 8).unwrap())
+            .unwrap_err(),
+        anmixiu_render_metal::RenderError::FilterBlurNestingTooDeep
+    );
+}
+
+#[test]
+fn nested_filter_blurs_use_distinct_layers_and_one_shared_scratch_pair() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let nested = DrawCommand::FilterBlur {
+        sigma: 1.0,
+        clip: None,
+        commands: Arc::from([DrawCommand::FilterBlur {
+            sigma: 1.0,
+            clip: None,
+            commands: Arc::from([DrawCommand::SolidQuad {
+                bounds: rect(6.0, 6.0, 4.0, 4.0),
+                color: Color::WHITE,
+                clip: None,
+            }]),
+        }]),
+    };
+    let image = renderer
+        .render_offscreen(&scene_with(nested), SurfaceSize::new(16, 16).unwrap())
+        .unwrap();
+
+    assert!(image.pixel_rgba(8, 8)[0] > 0);
+    assert_eq!(renderer.stats().filter_blur_operations, 2);
+    assert_eq!(renderer.stats().compositor_texture_bytes, 16 * 16 * 4 * 5);
+}
+
+#[test]
+fn filter_blur_treats_pixels_beyond_the_surface_as_transparent() {
+    let Some(mut renderer) = MetalRenderer::new().unwrap() else {
+        eprintln!("Metal device unavailable on this macOS host");
+        return;
+    };
+    let scene = Scene::new(
+        vec![
+            DrawCommand::SolidQuad {
+                bounds: rect(0.0, 0.0, 16.0, 16.0),
+                color: Color::BLACK,
+                clip: None,
+            },
+            DrawCommand::FilterBlur {
+                sigma: 2.0,
+                clip: None,
+                commands: Arc::from([DrawCommand::SolidQuad {
+                    bounds: rect(0.0, 0.0, 16.0, 16.0),
+                    color: Color::WHITE,
+                    clip: None,
+                }]),
+            },
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+    let image = renderer
+        .render_offscreen(&scene, SurfaceSize::new(16, 16).unwrap())
+        .unwrap();
+
+    let corner = image.pixel_rgba(0, 0);
+    assert!(
+        corner[0] < 220,
+        "transparent pixels outside the filter source should soften its corner: {corner:?}"
+    );
+    assert_eq!(image.pixel_rgba(8, 8), [255, 255, 255, 255]);
 }
 
 #[test]
@@ -399,6 +704,7 @@ fn configure_layer_opts_into_transaction_present() {
     };
     let layer = MetalLayer::new();
     renderer.configure_layer(&layer, SurfaceSize::new(64, 48).unwrap(), 1.0);
+    assert_eq!(layer.pixel_format(), MTLPixelFormat::BGRA8Unorm_sRGB);
     assert!(
         layer.presents_with_transaction(),
         "live-resize sync requires transaction-coordinated presents"

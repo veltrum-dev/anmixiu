@@ -12,6 +12,8 @@ use std::{
 /// Renderers clamp larger finite values to this limit before choosing platform-specific kernels
 /// and downsampling. The bound keeps effect work and sampling margins predictable across backends.
 pub const MAX_BACKDROP_BLUR_SIGMA: f32 = 64.0;
+/// Portable upper bound for an element-subtree Gaussian filter sigma in logical pixels.
+pub const MAX_FILTER_BLUR_SIGMA: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
@@ -95,6 +97,7 @@ impl Rect {
     }
 }
 
+/// An sRGB scene color with transfer-encoded RGB channels and a linear alpha channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -349,6 +352,15 @@ pub enum DrawCommand {
         /// Additional ancestor clip, such as a scroll viewport.
         clip: Option<Clip>,
     },
+    /// Renders `commands` into a transparent layer, applies a Gaussian blur, then composites the
+    /// filtered layer over the preceding commands. Nested groups represent nested element filters.
+    FilterBlur {
+        /// Gaussian sigma in logical pixels.
+        sigma: f32,
+        /// Ancestor clip applied after filtering so blurred pixels cannot escape a scroll viewport.
+        clip: Option<Clip>,
+        commands: Arc<[DrawCommand]>,
+    },
     Glyphs {
         glyphs: Arc<[Glyph]>,
         color: Color,
@@ -424,9 +436,12 @@ impl Scene {
     #[must_use]
     pub fn requires_compositing(&self) -> bool {
         *self.requires_compositing.get_or_init(|| {
-            self.commands
-                .iter()
-                .any(|command| matches!(command, DrawCommand::BackdropBlur { .. }))
+            self.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    DrawCommand::BackdropBlur { .. } | DrawCommand::FilterBlur { .. }
+                )
+            })
         })
     }
 

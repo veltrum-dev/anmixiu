@@ -1,5 +1,5 @@
 #[cfg(target_os = "macos")]
-use std::hint::black_box;
+use std::{hint::black_box, sync::Arc};
 
 #[cfg(target_os = "macos")]
 use criterion::BenchmarkId;
@@ -39,6 +39,32 @@ fn split_backdrop_scene(
                 clip: None,
             },
         ],
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn filter_blur_scene() -> anmixiu_scene::Scene {
+    use anmixiu_scene::{Color, DrawCommand, Point, Rect, Scene, Size};
+
+    Scene::new(
+        vec![DrawCommand::FilterBlur {
+            sigma: 10.0,
+            clip: None,
+            commands: Arc::from([
+                DrawCommand::SolidQuad {
+                    bounds: Rect::new(Point::new(48.0, 48.0), Size::new(80.0, 160.0)),
+                    color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                    clip: None,
+                },
+                DrawCommand::SolidQuad {
+                    bounds: Rect::new(Point::new(128.0, 48.0), Size::new(80.0, 160.0)),
+                    color: Color::rgba(0.0, 0.0, 1.0, 1.0),
+                    clip: None,
+                },
+            ]),
+        }],
         Vec::new(),
         Vec::new(),
     )
@@ -90,6 +116,16 @@ fn register(criterion: &mut Criterion) {
     group.bench_with_input(
         BenchmarkId::new("backdrop_blur_sigma", 16),
         &blur_scene,
+        |bencher, scene| {
+            bencher.iter(|| {
+                black_box(renderer.render_offscreen(black_box(scene), size).unwrap());
+            });
+        },
+    );
+    let filter_scene = filter_blur_scene();
+    group.bench_with_input(
+        BenchmarkId::new("filter_blur_sigma", 10),
+        &filter_scene,
         |bencher, scene| {
             bencher.iter(|| {
                 black_box(renderer.render_offscreen(black_box(scene), size).unwrap());

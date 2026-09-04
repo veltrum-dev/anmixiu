@@ -205,4 +205,35 @@ mod windows_rendering {
         assert_eq!(renderer.stats().backdrop_blur_operations, 1);
         assert!(renderer.stats().compositor_texture_bytes > 0);
     }
+
+    #[test]
+    fn filter_blur_uses_an_isolated_bounded_layer() {
+        let window = hidden_window();
+        let size = SurfaceSize::new(160, 64).unwrap();
+        let mut renderer = D3d11Renderer::new(window.0, size, 1.0).unwrap();
+        let scene = Scene::new(
+            vec![DrawCommand::FilterBlur {
+                sigma: 10.0,
+                clip: None,
+                commands: Arc::from([DrawCommand::SolidQuad {
+                    bounds: anmixiu_scene::Rect::new(
+                        Point::new(40.0, 8.0),
+                        anmixiu_scene::Size::new(80.0, 48.0),
+                    ),
+                    color: Color::WHITE,
+                    clip: None,
+                }]),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            renderer.render(&scene, size, 1.0).unwrap(),
+            FrameOutcome::Presented
+        );
+        assert_eq!(renderer.stats().composited_frames, 1);
+        assert_eq!(renderer.stats().filter_blur_operations, 1);
+        assert!(renderer.stats().compositor_texture_bytes >= 160 * 64 * 4 * 3);
+    }
 }

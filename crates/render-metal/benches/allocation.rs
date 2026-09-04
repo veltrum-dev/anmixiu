@@ -8,6 +8,27 @@ use stats_alloc::{Region, Stats};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[cfg(target_os = "macos")]
+fn filter_blur_scene() -> anmixiu_scene::Scene {
+    use std::sync::Arc;
+
+    use anmixiu_scene::{Color, DrawCommand, Point, Rect, Scene, Size};
+
+    Scene::new(
+        vec![DrawCommand::FilterBlur {
+            sigma: 10.0,
+            clip: None,
+            commands: Arc::from([DrawCommand::SolidQuad {
+                bounds: Rect::new(Point::new(48.0, 48.0), Size::new(160.0, 160.0)),
+                color: Color::WHITE,
+                clip: None,
+            }]),
+        }],
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     use anmixiu_render_metal::{MetalRenderer, SurfaceSize};
     use anmixiu_scene::{Color, DrawCommand, Point, Rect, Scene, Size};
@@ -85,6 +106,19 @@ fn main() {
     }
     report(
         "backdrop_blur_sigma_16",
+        100,
+        region.change(),
+        renderer.stats().cached_atlas_bytes,
+        renderer.stats().compositor_texture_bytes,
+    );
+    let filter_scene = filter_blur_scene();
+    drop(renderer.render_offscreen(&filter_scene, size).unwrap());
+    let region = Region::new(GLOBAL);
+    for _ in 0..100 {
+        drop(renderer.render_offscreen(&filter_scene, size).unwrap());
+    }
+    report(
+        "filter_blur_sigma_10",
         100,
         region.change(),
         renderer.stats().cached_atlas_bytes,

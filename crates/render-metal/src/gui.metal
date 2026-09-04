@@ -7,6 +7,7 @@ struct DrawUniforms {
     float4 clip_rect;
     float4 misc;
     float4 uv_rect;
+    float4 sample_uv_bounds;
 };
 
 struct VertexOut {
@@ -103,18 +104,47 @@ fragment float4 image_fragment(
         }
     }
     constexpr sampler image_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
-    return image.sample(image_sampler, in.uv);
+    float2 uv = clamp(in.uv, draw.sample_uv_bounds.xy, draw.sample_uv_bounds.zw);
+    return image.sample(image_sampler, uv);
 }
 
-fragment float4 blur_fragment(
+fragment float4 downsample_fragment(
     VertexOut in [[stage_in]],
     constant DrawUniforms &draw [[buffer(1)]],
     texture2d<float> image [[texture(0)]]) {
     constexpr sampler image_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    // Each bilinear sample covers a 2x2 texel pair. Spacing the taps by two therefore gives a
+    // complete box footprint with at most 8x8 filtered taps for the maximum 16x reduction.
+    int pair_count = clamp(int(draw.misc.x) / 2, 1, 8);
+    float first_offset = 1.0 - float(pair_count);
+    float4 accumulated = float4(0.0);
+    for (int sample_y = 0; sample_y < pair_count; sample_y++) {
+        float offset_y = first_offset + float(sample_y * 2);
+        for (int sample_x = 0; sample_x < pair_count; sample_x++) {
+            float offset_x = first_offset + float(sample_x * 2);
+            float2 uv = in.uv + float2(offset_x, offset_y) * draw.misc.yz;
+            if (draw.misc.w > 0.5) {
+                uv = clamp(uv, draw.sample_uv_bounds.xy, draw.sample_uv_bounds.zw);
+            }
+            accumulated += image.sample(image_sampler, uv);
+        }
+    }
+    return accumulated / float(pair_count * pair_count);
+}
+
+float4 gaussian_blur(
+    VertexOut in,
+    constant DrawUniforms &draw,
+    texture2d<float> image,
+    sampler image_sampler,
+    bool clamp_logical_edges) {
     float sigma = max(draw.misc.x, 0.001);
     int radius = min(int(ceil(sigma * 3.0)), 64);
     float center_weight = 1.0;
-    float4 accumulated = image.sample(image_sampler, in.uv) * center_weight;
+    float2 center_uv = clamp_logical_edges
+        ? clamp(in.uv, draw.sample_uv_bounds.xy, draw.sample_uv_bounds.zw)
+        : in.uv;
+    float4 accumulated = image.sample(image_sampler, center_uv) * center_weight;
     float total_weight = center_weight;
     for (int sample_index = 1; sample_index <= radius; sample_index += 2) {
         float first_offset = float(sample_index);
@@ -128,9 +158,37 @@ fragment float4 blur_fragment(
         float combined_offset =
             (first_offset * first_weight + second_offset * second_weight) / combined_weight;
         float2 sample_offset = combined_offset * draw.misc.yz;
-        accumulated += image.sample(image_sampler, in.uv + sample_offset) * combined_weight;
-        accumulated += image.sample(image_sampler, in.uv - sample_offset) * combined_weight;
+        float2 positive_uv = in.uv + sample_offset;
+        float2 negative_uv = in.uv - sample_offset;
+        if (clamp_logical_edges) {
+            positive_uv = clamp(
+                positive_uv,
+                draw.sample_uv_bounds.xy,
+                draw.sample_uv_bounds.zw);
+            negative_uv = clamp(
+                negative_uv,
+                draw.sample_uv_bounds.xy,
+                draw.sample_uv_bounds.zw);
+        }
+        accumulated += image.sample(image_sampler, positive_uv) * combined_weight;
+        accumulated += image.sample(image_sampler, negative_uv) * combined_weight;
         total_weight += combined_weight * 2.0;
     }
     return accumulated / total_weight;
+}
+
+fragment float4 blur_fragment(
+    VertexOut in [[stage_in]],
+    constant DrawUniforms &draw [[buffer(1)]],
+    texture2d<float> image [[texture(0)]]) {
+    constexpr sampler image_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    return gaussian_blur(in, draw, image, image_sampler, draw.misc.w > 0.5);
+}
+
+fragment float4 filter_blur_fragment(
+    VertexOut in [[stage_in]],
+    constant DrawUniforms &draw [[buffer(1)]],
+    texture2d<float> image [[texture(0)]]) {
+    constexpr sampler image_sampler(coord::normalized, address::clamp_to_zero, filter::linear);
+    return gaussian_blur(in, draw, image, image_sampler, false);
 }

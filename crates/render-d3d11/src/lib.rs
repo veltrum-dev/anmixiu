@@ -80,6 +80,7 @@ pub struct RenderStats {
     pub cached_atlas_bytes: usize,
     pub composited_frames: u64,
     pub backdrop_blur_operations: u64,
+    pub filter_blur_operations: u64,
     pub compositor_texture_bytes: usize,
 }
 
@@ -117,9 +118,13 @@ pub enum RenderError {
     MissingAtlas { atlas: u64 },
     #[error("a scene may contain at most 64 backdrop blur operations")]
     TooManyBackdropBlurs,
-    #[error("backdrop compositor textures exceed the 256 MiB hard budget")]
+    #[error("a scene may contain at most 64 filter blur operations")]
+    TooManyFilterBlurs,
+    #[error("filter blur nesting may not exceed 8 layers")]
+    FilterBlurNestingTooDeep,
+    #[error("compositor textures exceed the 256 MiB hard budget")]
     CompositorBudgetExceeded,
-    #[error("backdrop compositor resources were not prepared for the scene")]
+    #[error("compositor resources were not prepared for the scene")]
     CompositorResourcesUnavailable,
     #[error("D3D11/Direct2D operation failed: {0}")]
     Graphics(String),
@@ -140,7 +145,8 @@ mod platform {
     };
 
     use anmixiu_scene::{
-        AtlasId, AtlasUpload, Clip, Color, DrawCommand, MAX_BACKDROP_BLUR_SIGMA, Rect, Scene,
+        AtlasId, AtlasUpload, Clip, Color, DrawCommand, MAX_BACKDROP_BLUR_SIGMA,
+        MAX_FILTER_BLUR_SIGMA, Rect, Scene,
     };
     use windows::{
         Win32::{
@@ -203,6 +209,8 @@ mod platform {
     }
 
     const MAX_BACKDROP_BLURS_PER_FRAME: usize = 64;
+    const MAX_FILTER_BLURS_PER_FRAME: usize = 64;
+    const MAX_FILTER_BLUR_DEPTH: usize = 8;
     const COMPOSITOR_TEXTURE_BUDGET: usize = 256 * 1024 * 1024;
 
     #[derive(Clone, Copy)]
@@ -222,6 +230,7 @@ mod platform {
         composite_scene: Option<ID2D1Bitmap1>,
         composite_scratch: Option<ID2D1Bitmap1>,
         composite_scratch_size: Option<SurfaceSize>,
+        filter_layers: Vec<ID2D1Bitmap1>,
         blur_effect: Option<ID2D1Effect>,
         brush: ID2D1SolidColorBrush,
         surface: SurfaceSize,
@@ -322,6 +331,7 @@ mod platform {
                 composite_scene: None,
                 composite_scratch: None,
                 composite_scratch_size: None,
+                filter_layers: Vec::new(),
                 blur_effect: None,
                 brush,
                 surface: size,
@@ -363,6 +373,7 @@ mod platform {
             self.composite_scene = None;
             self.composite_scratch = None;
             self.composite_scratch_size = None;
+            self.filter_layers.clear();
             self.stats.compositor_texture_bytes = 0;
             // SAFETY: Width and height are non-zero by SurfaceSize construction; format and flags
             // are preserved from the original swap chain.
@@ -455,51 +466,7 @@ mod platform {
                 .clone()
                 .ok_or(RenderError::CompositorResourcesUnavailable)?;
             let clear = D2D1_COLOR_F::default();
-            // SAFETY: The intermediate bitmap belongs to this context and is not sampled while it
-            // is bound as the current target.
-            unsafe {
-                self.context.SetTarget(&scene_bitmap);
-                self.context.BeginDraw();
-                self.context.Clear(Some(&raw const clear));
-            }
-
-            let mut draw_result = Ok(());
-            for command in scene.commands() {
-                if let DrawCommand::BackdropBlur {
-                    bounds,
-                    sigma,
-                    corner_radius,
-                    clip,
-                } = command
-                {
-                    let Some(plan) = d2d_blur_plan(command, self.surface, self.scale) else {
-                        continue;
-                    };
-                    // SAFETY: This closes the scene-target draw before that bitmap becomes the
-                    // Gaussian effect input.
-                    if let Err(error) = unsafe { self.context.EndDraw(None, None) } {
-                        return Err(graphics_error(error));
-                    }
-                    self.draw_backdrop_blur(
-                        &scene_bitmap,
-                        plan,
-                        *bounds,
-                        *sigma,
-                        *corner_radius,
-                        *clip,
-                    )?;
-                    continue;
-                }
-                if let Err(error) = self.draw_command(command) {
-                    draw_result = Err(error);
-                    break;
-                }
-            }
-            // SAFETY: `draw_backdrop_blur` leaves the scene target inside a fresh BeginDraw, while
-            // the initial path began it above; this closes either balanced path.
-            let end_result = unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error);
-            draw_result?;
-            end_result?;
+            self.draw_commands_to_bitmap(&scene_bitmap, scene.commands(), 0, true)?;
 
             let target = self
                 .target
@@ -535,30 +502,109 @@ mod platform {
             Ok(())
         }
 
-        fn prepare_compositor(&mut self, scene: &Scene) -> Result<(), RenderError> {
-            let blur_count = scene
-                .commands()
-                .iter()
-                .filter(|command| matches!(command, DrawCommand::BackdropBlur { .. }))
-                .count();
-            if blur_count > MAX_BACKDROP_BLURS_PER_FRAME {
-                return Err(RenderError::TooManyBackdropBlurs);
-            }
-            let mut scratch_width = 0;
-            let mut scratch_height = 0;
-            for command in scene.commands() {
-                if let Some(plan) = d2d_blur_plan(command, self.surface, self.scale) {
-                    scratch_width = scratch_width.max(plan.scratch_size.width());
-                    scratch_height = scratch_height.max(plan.scratch_size.height());
+        fn draw_commands_to_bitmap(
+            &mut self,
+            target: &ID2D1Bitmap1,
+            commands: &[DrawCommand],
+            filter_depth: usize,
+            clear_target: bool,
+        ) -> Result<(), RenderError> {
+            let clear = D2D1_COLOR_F::default();
+            // SAFETY: The target belongs to this context and is not sampled while bound. Every
+            // effect path below closes this draw before using the target as an input.
+            unsafe {
+                self.context.SetTarget(target);
+                self.context.BeginDraw();
+                if clear_target {
+                    self.context.Clear(Some(&raw const clear));
                 }
             }
-            let scratch_size = if scratch_width > 0 && scratch_height > 0 {
-                Some(SurfaceSize::new(scratch_width, scratch_height)?)
-            } else {
-                None
-            };
-            let total_bytes =
-                bitmap_bytes(self.surface).saturating_add(scratch_size.map_or(0, bitmap_bytes));
+            let mut draw_result = Ok(());
+            for command in commands {
+                match command {
+                    DrawCommand::BackdropBlur {
+                        bounds,
+                        sigma,
+                        corner_radius,
+                        clip,
+                    } => {
+                        let Some(plan) = d2d_blur_plan(command, self.surface, self.scale) else {
+                            continue;
+                        };
+                        // SAFETY: Closes the target before it becomes the Gaussian effect input.
+                        if let Err(error) = unsafe { self.context.EndDraw(None, None) } {
+                            return Err(graphics_error(error));
+                        }
+                        self.draw_backdrop_blur(
+                            target,
+                            plan,
+                            *bounds,
+                            *sigma,
+                            *corner_radius,
+                            *clip,
+                        )?;
+                    }
+                    DrawCommand::FilterBlur {
+                        sigma,
+                        clip,
+                        commands,
+                    } => {
+                        // SAFETY: Closes the parent before a child layer becomes the target.
+                        if let Err(error) = unsafe { self.context.EndDraw(None, None) } {
+                            return Err(graphics_error(error));
+                        }
+                        if let Some(plan) = d2d_filter_blur_plan(*sigma, self.surface, self.scale) {
+                            self.draw_filter_blur(
+                                target,
+                                commands,
+                                *clip,
+                                plan,
+                                *sigma,
+                                filter_depth,
+                            )?;
+                        } else {
+                            self.draw_commands_to_bitmap(target, commands, filter_depth, false)?;
+                            // SAFETY: The flattened invalid-filter commands ended their draw; resume
+                            // the parent target for following siblings.
+                            unsafe {
+                                self.context.SetTarget(target);
+                                self.context.BeginDraw();
+                            }
+                        }
+                    }
+                    DrawCommand::SolidQuad { .. }
+                    | DrawCommand::RoundedQuad { .. }
+                    | DrawCommand::RoundedBorder { .. }
+                    | DrawCommand::Glyphs { .. } => {
+                        if let Err(error) = self.draw_command(command) {
+                            draw_result = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            // SAFETY: Balances either the initial BeginDraw or the fresh parent BeginDraw left by
+            // each successful blur operation.
+            let end_result = unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error);
+            draw_result?;
+            end_result
+        }
+
+        fn prepare_compositor(&mut self, scene: &Scene) -> Result<(), RenderError> {
+            let requirements =
+                d2d_compositor_requirements(scene.commands(), self.surface, self.scale)?;
+            if requirements.backdrop_blur_count > MAX_BACKDROP_BLURS_PER_FRAME {
+                return Err(RenderError::TooManyBackdropBlurs);
+            }
+            if requirements.filter_blur_count > MAX_FILTER_BLURS_PER_FRAME {
+                return Err(RenderError::TooManyFilterBlurs);
+            }
+            let scratch_size = requirements.scratch_size;
+            let total_bytes = bitmap_bytes(self.surface)
+                .saturating_add(scratch_size.map_or(0, bitmap_bytes))
+                .saturating_add(
+                    bitmap_bytes(self.surface).saturating_mul(requirements.filter_layer_depth),
+                );
             if total_bytes > COMPOSITOR_TEXTURE_BUDGET {
                 return Err(RenderError::CompositorBudgetExceeded);
             }
@@ -591,6 +637,11 @@ mod platform {
                 self.composite_scratch = None;
                 self.composite_scratch_size = None;
             }
+            if self.filter_layers.len() != requirements.filter_layer_depth {
+                self.filter_layers = (0..requirements.filter_layer_depth)
+                    .map(|_| create_composite_bitmap(&self.context, self.surface, self.scale))
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             self.stats.compositor_texture_bytes = total_bytes;
             Ok(())
         }
@@ -604,6 +655,65 @@ mod platform {
             corner_radius: f32,
             ancestor_clip: Option<Clip>,
         ) -> Result<(), RenderError> {
+            let scratch = self.draw_blur_into_scratch(
+                scene_bitmap,
+                plan,
+                sigma.clamp(f32::EPSILON, MAX_BACKDROP_BLUR_SIGMA),
+            )?;
+            // SAFETY: Rebinds the scene after it is no longer an effect input.
+            unsafe {
+                self.context.SetTarget(scene_bitmap);
+                self.context.BeginDraw();
+            }
+            let own_clip = Clip::rounded(bounds, corner_radius);
+            let composite_result = self.draw_with_clip(ancestor_clip, |renderer| {
+                renderer.draw_with_clip(Some(own_clip), |renderer| {
+                    let destination = d2d_rect(plan.sample_bounds);
+                    let source = D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: plan.sample_bounds.size.width,
+                        bottom: plan.sample_bounds.size.height,
+                    };
+                    // SAFETY: The scratch bitmap is no longer bound as a target. COPY replaces the
+                    // original backdrop rather than alpha-compositing it a second time.
+                    unsafe {
+                        renderer
+                            .context
+                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+                        renderer.context.DrawBitmap(
+                            &scratch,
+                            Some(&raw const destination),
+                            1.0,
+                            D2D1_INTERPOLATION_MODE_LINEAR,
+                            Some(&raw const source),
+                            None,
+                        );
+                        renderer
+                            .context
+                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                    }
+                    Ok(1)
+                })?;
+                Ok(0)
+            });
+            if let Err(error) = composite_result {
+                // SAFETY: An error while constructing or drawing a clip still leaves the scene's
+                // BeginDraw active; close it before propagating the failure.
+                unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error)?;
+                return Err(error);
+            }
+            self.stats.backdrop_blur_operations =
+                self.stats.backdrop_blur_operations.saturating_add(1);
+            Ok(())
+        }
+
+        fn draw_blur_into_scratch(
+            &mut self,
+            source_bitmap: &ID2D1Bitmap1,
+            plan: BlurPlan,
+            sigma: f32,
+        ) -> Result<ID2D1Bitmap1, RenderError> {
             let scratch = self
                 .composite_scratch
                 .clone()
@@ -612,11 +722,10 @@ mod platform {
                 .blur_effect
                 .clone()
                 .ok_or(RenderError::CompositorResourcesUnavailable)?;
-            let sigma = sigma.clamp(f32::EPSILON, MAX_BACKDROP_BLUR_SIGMA);
             let sigma_bytes = sigma.to_ne_bytes();
-            // SAFETY: The scene bitmap is unbound after EndDraw and remains live while the effect
+            // SAFETY: The source bitmap is unbound after EndDraw and remains live while the effect
             // graph is encoded.
-            unsafe { effect.SetInput(0, scene_bitmap, true) };
+            unsafe { effect.SetInput(0, source_bitmap, true) };
             let prepared_effect = (|| -> Result<(ID2D1Image, D2D_RECT_F), RenderError> {
                 // SAFETY: Property bytes contain exactly one native-endian f32.
                 unsafe {
@@ -669,52 +778,65 @@ mod platform {
             // bitmap's source binding before it becomes the target again.
             unsafe { effect.SetInput(0, None::<&ID2D1Image>, true) };
             scratch_result?;
+            Ok(scratch)
+        }
 
-            // SAFETY: Rebinds the scene after it is no longer an effect input.
+        #[allow(clippy::too_many_arguments)]
+        fn draw_filter_blur(
+            &mut self,
+            parent: &ID2D1Bitmap1,
+            commands: &[DrawCommand],
+            ancestor_clip: Option<Clip>,
+            plan: BlurPlan,
+            sigma: f32,
+            filter_depth: usize,
+        ) -> Result<(), RenderError> {
+            let layer = self
+                .filter_layers
+                .get(filter_depth)
+                .cloned()
+                .ok_or(RenderError::CompositorResourcesUnavailable)?;
+            self.draw_commands_to_bitmap(&layer, commands, filter_depth.saturating_add(1), true)?;
+            let scratch = self.draw_blur_into_scratch(
+                &layer,
+                plan,
+                sigma.clamp(f32::EPSILON, MAX_FILTER_BLUR_SIGMA),
+            )?;
+            // SAFETY: The parent is distinct from the unbound filter layer and scratch bitmap.
             unsafe {
-                self.context.SetTarget(scene_bitmap);
+                self.context.SetTarget(parent);
                 self.context.BeginDraw();
+                self.context
+                    .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
             }
-            let own_clip = Clip::rounded(bounds, corner_radius);
             let composite_result = self.draw_with_clip(ancestor_clip, |renderer| {
-                renderer.draw_with_clip(Some(own_clip), |renderer| {
-                    let destination = d2d_rect(plan.sample_bounds);
-                    let source = D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: plan.sample_bounds.size.width,
-                        bottom: plan.sample_bounds.size.height,
-                    };
-                    // SAFETY: The scratch bitmap is no longer bound as a target. COPY replaces the
-                    // original backdrop rather than alpha-compositing it a second time.
-                    unsafe {
-                        renderer
-                            .context
-                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
-                        renderer.context.DrawBitmap(
-                            &scratch,
-                            Some(&raw const destination),
-                            1.0,
-                            D2D1_INTERPOLATION_MODE_LINEAR,
-                            Some(&raw const source),
-                            None,
-                        );
-                        renderer
-                            .context
-                            .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
-                    }
-                    Ok(1)
-                })?;
-                Ok(0)
+                let destination = d2d_rect(plan.sample_bounds);
+                let source = D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: plan.sample_bounds.size.width,
+                    bottom: plan.sample_bounds.size.height,
+                };
+                // SAFETY: Scratch is no longer a target and stores premultiplied filtered pixels;
+                // SOURCE_OVER composites the isolated subtree without sampling the parent.
+                unsafe {
+                    renderer.context.DrawBitmap(
+                        &scratch,
+                        Some(&raw const destination),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        Some(&raw const source),
+                        None,
+                    );
+                }
+                Ok(1)
             });
             if let Err(error) = composite_result {
-                // SAFETY: An error while constructing or drawing a clip still leaves the scene's
-                // BeginDraw active; close it before propagating the failure.
+                // SAFETY: A clip failure leaves the balanced parent draw active.
                 unsafe { self.context.EndDraw(None, None) }.map_err(graphics_error)?;
                 return Err(error);
             }
-            self.stats.backdrop_blur_operations =
-                self.stats.backdrop_blur_operations.saturating_add(1);
+            self.stats.filter_blur_operations = self.stats.filter_blur_operations.saturating_add(1);
             Ok(())
         }
 
@@ -794,7 +916,7 @@ mod platform {
                     };
                     Ok(1)
                 }),
-                DrawCommand::BackdropBlur { .. } => Ok(()),
+                DrawCommand::BackdropBlur { .. } | DrawCommand::FilterBlur { .. } => Ok(()),
                 DrawCommand::Glyphs {
                     glyphs,
                     color,
@@ -997,15 +1119,28 @@ mod platform {
         }
 
         fn validate_scene_atlases(&self, scene: &Scene) -> Result<(), RenderError> {
-            for command in scene.commands() {
-                if let DrawCommand::Glyphs { glyphs, .. } = command {
-                    for glyph in glyphs.iter() {
-                        if !self.atlases.contains_key(&glyph.atlas) {
-                            return Err(RenderError::MissingAtlas {
-                                atlas: glyph.atlas.0,
-                            });
+            self.validate_command_atlases(scene.commands())
+        }
+
+        fn validate_command_atlases(&self, commands: &[DrawCommand]) -> Result<(), RenderError> {
+            for command in commands {
+                match command {
+                    DrawCommand::Glyphs { glyphs, .. } => {
+                        for glyph in glyphs.iter() {
+                            if !self.atlases.contains_key(&glyph.atlas) {
+                                return Err(RenderError::MissingAtlas {
+                                    atlas: glyph.atlas.0,
+                                });
+                            }
                         }
                     }
+                    DrawCommand::FilterBlur { commands, .. } => {
+                        self.validate_command_atlases(commands)?;
+                    }
+                    DrawCommand::SolidQuad { .. }
+                    | DrawCommand::RoundedQuad { .. }
+                    | DrawCommand::RoundedBorder { .. }
+                    | DrawCommand::BackdropBlur { .. } => {}
                 }
             }
             Ok(())
@@ -1101,6 +1236,104 @@ mod platform {
         // creating context's resource domain. Omitting CANNOT_DRAW makes it a valid effect input.
         unsafe { context.CreateBitmap(pixel_size, None, 0, &raw const properties) }
             .map_err(graphics_error)
+    }
+
+    #[derive(Default)]
+    struct CompositorRequirements {
+        scratch_size: Option<SurfaceSize>,
+        backdrop_blur_count: usize,
+        filter_blur_count: usize,
+        filter_layer_depth: usize,
+    }
+
+    fn d2d_compositor_requirements(
+        commands: &[DrawCommand],
+        surface: SurfaceSize,
+        scale: f32,
+    ) -> Result<CompositorRequirements, RenderError> {
+        let mut requirements = CompositorRequirements::default();
+        collect_d2d_compositor_requirements(commands, surface, scale, 0, &mut requirements)?;
+        Ok(requirements)
+    }
+
+    fn collect_d2d_compositor_requirements(
+        commands: &[DrawCommand],
+        surface: SurfaceSize,
+        scale: f32,
+        filter_depth: usize,
+        requirements: &mut CompositorRequirements,
+    ) -> Result<(), RenderError> {
+        for command in commands {
+            match command {
+                DrawCommand::BackdropBlur { .. } => {
+                    requirements.backdrop_blur_count =
+                        requirements.backdrop_blur_count.saturating_add(1);
+                    if let Some(plan) = d2d_blur_plan(command, surface, scale) {
+                        include_d2d_scratch_size(requirements, plan.scratch_size);
+                    }
+                }
+                DrawCommand::FilterBlur {
+                    sigma, commands, ..
+                } => {
+                    requirements.filter_blur_count =
+                        requirements.filter_blur_count.saturating_add(1);
+                    let plan = d2d_filter_blur_plan(*sigma, surface, scale);
+                    let nested_depth = if let Some(plan) = plan {
+                        let nested_depth = filter_depth.saturating_add(1);
+                        if nested_depth > MAX_FILTER_BLUR_DEPTH {
+                            return Err(RenderError::FilterBlurNestingTooDeep);
+                        }
+                        requirements.filter_layer_depth =
+                            requirements.filter_layer_depth.max(nested_depth);
+                        include_d2d_scratch_size(requirements, plan.scratch_size);
+                        nested_depth
+                    } else {
+                        filter_depth
+                    };
+                    collect_d2d_compositor_requirements(
+                        commands,
+                        surface,
+                        scale,
+                        nested_depth,
+                        requirements,
+                    )?;
+                }
+                DrawCommand::SolidQuad { .. }
+                | DrawCommand::RoundedQuad { .. }
+                | DrawCommand::RoundedBorder { .. }
+                | DrawCommand::Glyphs { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn include_d2d_scratch_size(
+        requirements: &mut CompositorRequirements,
+        scratch_size: SurfaceSize,
+    ) {
+        requirements.scratch_size = Some(requirements.scratch_size.map_or(
+            scratch_size,
+            |current| SurfaceSize {
+                width: current.width().max(scratch_size.width()),
+                height: current.height().max(scratch_size.height()),
+            },
+        ));
+    }
+
+    fn d2d_filter_blur_plan(sigma: f32, surface: SurfaceSize, scale: f32) -> Option<BlurPlan> {
+        if !sigma.is_finite() || sigma <= 0.0 {
+            return None;
+        }
+        Some(BlurPlan {
+            sample_bounds: Rect::new(
+                anmixiu_scene::Point::new(0.0, 0.0),
+                anmixiu_scene::Size::new(
+                    surface.width() as f32 / scale,
+                    surface.height() as f32 / scale,
+                ),
+            ),
+            scratch_size: surface,
+        })
     }
 
     fn d2d_blur_plan(command: &DrawCommand, surface: SurfaceSize, scale: f32) -> Option<BlurPlan> {
