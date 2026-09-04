@@ -14,6 +14,7 @@ members = [
     "crates/text-directwrite",
     "crates/platform-macos",
     "crates/platform-windows",
+    "crates/macros",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ anmixiu-text-coretext = { path = "crates/text-coretext", version = "0.1.0" }
 anmixiu-text-directwrite = { path = "crates/text-directwrite", version = "0.1.0" }
 anmixiu-platform-macos = { path = "crates/platform-macos", version = "0.1.0" }
 anmixiu-platform-windows = { path = "crates/platform-windows", version = "0.1.0" }
+anmixiu-macros = { path = "crates/macros", version = "0.1.0" }
 async-task = "4.7.1"
 bitflags = "2.9.4"
 core-graphics = "0.25.0"
@@ -50,6 +52,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-foundation = { version = "0.3.2", default-features = false }
 objc2-quartz-core = { version = "0.3.2", default-features = false }
 parking_lot = "0.12.4"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 smol_str = "0.3.6"
 stats_alloc = "0.1.10"
 taffy = { version = "0.9.1", default-features = false, features = ["std", "flexbox"] }
@@ -57,6 +61,7 @@ thiserror = "2.0.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["fmt", "ansi"] }
 tokio = { version = "1.47.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "net", "io-util", "macros"] }
+syn = { version = "2.0.119", features = ["derive", "parsing"] }
 windows = { version = "0.62.2", default-features = false, features = ["std"] }
 windows-core = "0.62.2"
 windows-numerics = "0.3.1"

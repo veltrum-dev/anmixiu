@@ -131,6 +131,11 @@ deep-clone the tree.
 the concrete builder type and conditionally apply a closure, avoiding an erased conditional-element
 type while supporting optional subtrees, styles, and handlers.
 
+The optional `anmixiu` `macros` feature provides `#[derive(Element)]`. A field marked
+`#[element(style)]` delegates `Styled`; adding `parent` to that marker delegates `ParentElement` as
+well. The derive emits no lifecycle or interaction implementation, so `Lifecycle::render` and other
+capabilities remain explicit and capability segregation is preserved.
+
 ## Typed events
 
 `Lifecycle::bind_events` is a default no-op hook invoked once after the first frame is painted. Its

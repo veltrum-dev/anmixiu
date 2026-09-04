@@ -29,6 +29,8 @@ pub use anmixiu_core::{
     Typography, Window, WindowError, WindowHandle, WindowId, WindowInfo, WindowMode, WindowSize,
     WindowStatus, WindowUpdate, WindowVisibility, button, div, px, shared_format, text,
 };
+#[cfg(feature = "macros")]
+pub use anmixiu_macros::Element;
 pub use anmixiu_reactive::Signal;
 
 #[cfg(target_os = "macos")]

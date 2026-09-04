@@ -89,6 +89,28 @@ div()
 These aliases do not parse class strings or add a theme and spacing scale. The long-form builders
 remain available with and without the feature.
 
+Enable the optional `macros` feature to derive the capability implementations for custom Elements.
+Mark the field that owns the real style and, when needed, the parent-child storage explicitly:
+
+```rust
+use anmixiu::prelude::*;
+
+#[derive(Element)]
+struct Card {
+    #[element(style, parent)]
+    root: DivElement,
+}
+
+impl Lifecycle for Card {
+    fn render(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.root.clone()
+    }
+}
+```
+
+The derive generates `Styled`, `ParentElement`, and `Element` only for the markers that are
+present; `Lifecycle` and interaction capabilities remain explicit.
+
 Backdrop blur is a paint-only effect. Its Gaussian sigma is expressed in logical pixels and applies
 only to content already painted behind the element; the element's own background, border, text, and
 children remain sharp. A translucent fill is typically layered over the filtered backdrop:
