@@ -47,6 +47,11 @@ use crate::{DevToolsAgent, devtools::DevToolsCommand};
 
 const MAX_RENDER_INVALIDATIONS: usize = 8;
 
+// AppKit can deliver a geometry notification before a full-screen or zoom transaction has
+// applied the final NSView bounds. Keep sampling for a bounded tail so the display link observes
+// the settled viewport even when the first notification reports the old size.
+const RESIZE_SETTLE_FRAMES: u32 = 32;
+
 // A component driving a continuous animation is legitimate, but one that has been requesting frames
 // for this many consecutive turns (~10s at 60fps) is very likely a `request_animation_frame` that
 // forgot to stop. We only warn (once per crossing) in debug builds — animation frames are paced by
@@ -634,7 +639,11 @@ impl AppSession {
         if let Some((view, driver)) = target {
             let viewport = viewport_for_view(&view);
             driver.resize(viewport);
+            driver.refresh_surface();
             self.sync_window_info(id);
+            // The first bounds sample can still be the pre-transition size. Keep the display link
+            // alive for a bounded tail so later ticks resample the final full-screen/zoom bounds.
+            view.arm_resize_settle();
             self.schedule_dirty_windows();
         }
     }
@@ -836,6 +845,7 @@ trait NativeDriver {
     fn attach(&self, viewport: Viewport, layer: MetalLayer);
     fn draw(&self);
     fn resize(&self, viewport: Viewport);
+    fn refresh_surface(&self);
     fn pointer_moved(&self, point: Point);
     fn cursor_style_at(&self, point: Point) -> CursorStyle;
     fn pointer_exited(&self);
@@ -1278,6 +1288,14 @@ impl NativeDriver for ComponentDriver {
         }
     }
 
+    fn refresh_surface(&self) {
+        let mut state = self.state.borrow_mut();
+        state.configured_viewport = None;
+        state.needs_frame = true;
+        drop(state);
+        self.request_display();
+    }
+
     fn pointer_moved(&self, point: Point) {
         let mut state = self.state.borrow_mut();
         state.pointer.update_position(point.x, point.y);
@@ -1461,6 +1479,7 @@ struct ViewIvars {
     tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
     display_link: RefCell<Option<Retained<CADisplayLink>>>,
     display_queued: Cell<bool>,
+    resize_settle_frames: Cell<u32>,
     scroll_axis_lock: Cell<ScrollAxisLock>,
 }
 
@@ -1471,6 +1490,7 @@ impl ViewIvars {
             tracking_area: RefCell::new(None),
             display_link: RefCell::new(None),
             display_queued: Cell::new(false),
+            resize_settle_frames: Cell::new(0),
             scroll_axis_lock: Cell::new(ScrollAxisLock::Free),
         }
     }
@@ -1511,10 +1531,14 @@ define_class!(
         fn display_link_tick(&self, link: &CADisplayLink) {
             with_driver_resize(self);
             let window_id = self.ivars().window_id;
-            if self.ivars().display_queued.replace(false) {
+            let settling = self.ivars().resize_settle_frames.get();
+            if settling > 0 {
+                self.ivars().resize_settle_frames.set(settling - 1);
+            }
+            if self.ivars().display_queued.replace(false) || settling > 0 {
                 with_driver(window_id, |driver| driver.draw());
             }
-            if !self.ivars().display_queued.get() {
+            if !self.ivars().display_queued.get() && self.ivars().resize_settle_frames.get() == 0 {
                 link.setPaused(true);
             }
         }
@@ -1608,6 +1632,8 @@ define_class!(
             // SAFETY: super dispatch targets NSView's implementation with the declared signature.
             unsafe { msg_send![super(self), setFrameSize: size] }
             with_driver_resize(self);
+            with_driver_surface_refresh(self);
+            self.arm_resize_settle();
         }
 
         // SAFETY: Signature matches -[NSView viewDidChangeBackingProperties].
@@ -1616,6 +1642,18 @@ define_class!(
             // SAFETY: super dispatch targets NSView's implementation with no arguments.
             unsafe { msg_send![super(self), viewDidChangeBackingProperties] }
             with_driver_resize(self);
+            with_driver_surface_refresh(self);
+            self.arm_resize_settle();
+        }
+
+        // SAFETY: Signature matches -[NSView viewDidEndLiveResize].
+        #[unsafe(method(viewDidEndLiveResize))]
+        fn view_did_end_live_resize(&self) {
+            // SAFETY: super dispatch targets NSView's implementation with no arguments.
+            unsafe { msg_send![super(self), viewDidEndLiveResize] }
+            with_driver_resize(self);
+            with_driver_surface_refresh(self);
+            self.arm_resize_settle();
         }
 
         // SAFETY: Signature matches -[NSView layer:shouldInheritContentsScale:fromWindow:].
@@ -1706,6 +1744,23 @@ impl AnmixiuView {
     fn queue_display(&self) {
         self.ivars().display_queued.set(true);
     }
+
+    fn arm_resize_settle(&self) {
+        self.ivars()
+            .resize_settle_frames
+            .set(next_resize_settle_frames(
+                self.ivars().resize_settle_frames.get(),
+            ));
+        self.queue_display();
+        // Ensure AppKit also schedules the view's draw boundary. This covers transitions where the
+        // display link was paused while the window transaction was being committed.
+        self.setNeedsDisplayInRect(self.bounds());
+        let _ = self.resume_display_link();
+    }
+}
+
+fn next_resize_settle_frames(_current: u32) -> u32 {
+    RESIZE_SETTLE_FRAMES
 }
 
 #[derive(Clone, Copy)]
@@ -1801,20 +1856,30 @@ fn anonymous_self_invalidators(dirty: &[OwnerId], animating: &[OwnerId]) -> Vec<
 
 fn viewport_for_view(view: &NSView) -> Viewport {
     let logical = view.bounds().size;
-    let backing = view.convertSizeToBacking(logical);
-    let physical_width = backing.width.round().max(1.0) as u32;
-    let physical_height = backing.height.round().max(1.0) as u32;
-    let scale_x = if logical.width > 0.0 {
-        backing.width / logical.width
-    } else {
-        1.0
-    };
-    let scale_y = if logical.height > 0.0 {
-        backing.height / logical.height
-    } else {
-        1.0
-    };
-    let scale = scale_x.midpoint(scale_y) as f32;
+    // `convertSizeToBacking` can retain the previous conversion during an AppKit zoom/full-screen
+    // transaction. The window's backingScaleFactor is the authoritative DPI for the current
+    // screen; derive the physical drawable dimensions from that same value so layout, text raster
+    // selection, layer contentsScale, and drawableSize cannot disagree for one frame.
+    let scale = view
+        .window()
+        .map(|window| window.backingScaleFactor() as f32)
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or_else(|| {
+            let backing = view.convertSizeToBacking(logical);
+            let scale_x = if logical.width > 0.0 {
+                backing.width / logical.width
+            } else {
+                1.0
+            };
+            let scale_y = if logical.height > 0.0 {
+                backing.height / logical.height
+            } else {
+                1.0
+            };
+            scale_x.midpoint(scale_y) as f32
+        });
+    let physical_width = (logical.width * f64::from(scale)).round().max(1.0) as u32;
+    let physical_height = (logical.height * f64::from(scale)).round().max(1.0) as u32;
     Viewport::with_backing_size(
         logical.width as f32,
         logical.height as f32,
@@ -1825,8 +1890,24 @@ fn viewport_for_view(view: &NSView) -> Viewport {
 }
 
 fn with_driver_resize(view: &AnmixiuView) {
+    sync_layer_frame(view);
     let viewport = viewport_for_view(view);
     with_driver(view.ivars().window_id, |driver| driver.resize(viewport));
+}
+
+fn with_driver_surface_refresh(view: &AnmixiuView) {
+    with_driver(view.ivars().window_id, |driver| driver.refresh_surface());
+}
+
+fn sync_layer_frame(view: &NSView) {
+    // A manually installed CAMetalLayer is not guaranteed to receive the new frame at the same
+    // point as its layer-backed NSView during a zoom/full-screen transaction. Keep the layer's
+    // geometry tied to the current bounds before configuring its drawable size.
+    if let Some(layer) = view.layer() {
+        // SAFETY: `layer` is a Core Animation CALayer and `setFrame:` accepts the NSRect/CGRect
+        // representation used by this target's AppKit bindings.
+        unsafe { msg_send![&*layer, setFrame: view.bounds()] }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1912,6 +1993,12 @@ define_class!(
             with_app_session(|session| session.window_changed(self.ivars().window_id));
         }
 
+        // SAFETY: Signature matches windowDidEndLiveResize:.
+        #[unsafe(method(windowDidEndLiveResize:))]
+        fn window_did_end_live_resize(&self, _notification: &NSNotification) {
+            with_app_session(|session| session.window_changed(self.ivars().window_id));
+        }
+
         // SAFETY: Signature matches windowDidMiniaturize:.
         #[unsafe(method(windowDidMiniaturize:))]
         fn window_did_miniaturize(&self, _notification: &NSNotification) {
@@ -1966,8 +2053,8 @@ fn with_app_session(operation: impl FnOnce(&AppSession)) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RENDER_INVALIDATIONS, anonymous_self_invalidators, drain_reentrant_queue,
-        take_drawable_retry_slot,
+        MAX_RENDER_INVALIDATIONS, RESIZE_SETTLE_FRAMES, anonymous_self_invalidators,
+        drain_reentrant_queue, next_resize_settle_frames, take_drawable_retry_slot,
     };
     use crate::InvalidationGuard;
     use anmixiu_reactive::OwnerRegistry;
@@ -1994,6 +2081,16 @@ mod tests {
         let mut armed = false;
         assert!(take_drawable_retry_slot(&mut armed));
         assert!(!take_drawable_retry_slot(&mut armed));
+    }
+
+    #[test]
+    fn resize_settle_window_restarts_without_accumulating() {
+        assert_eq!(next_resize_settle_frames(0), RESIZE_SETTLE_FRAMES);
+        assert_eq!(
+            next_resize_settle_frames(RESIZE_SETTLE_FRAMES),
+            RESIZE_SETTLE_FRAMES
+        );
+        assert_eq!(next_resize_settle_frames(1), RESIZE_SETTLE_FRAMES);
     }
 
     #[test]
