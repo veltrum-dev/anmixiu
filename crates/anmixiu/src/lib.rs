@@ -33,10 +33,8 @@ pub use anmixiu_core::{
 pub use anmixiu_macros::Element;
 pub use anmixiu_reactive::Signal;
 
-#[cfg(target_os = "macos")]
-pub use anmixiu_platform_macos::{App, AppError};
-#[cfg(target_os = "windows")]
-pub use anmixiu_platform_windows::{App, AppError};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub use anmixiu_platform::{App, AppError};
 
 pub mod prelude {
     pub use crate::{

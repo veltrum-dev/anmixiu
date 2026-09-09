@@ -11,8 +11,7 @@ rust-version.workspace = true
 default = []
 devtools = [
     "anmixiu-core/devtools",
-    "anmixiu-platform-macos/devtools",
-    "anmixiu-platform-windows/devtools",
+    "anmixiu-platform/devtools",
 ]
 tailwind = ["anmixiu-core/tailwind"]
 macros = ["dep:anmixiu-macros"]
@@ -23,10 +22,10 @@ anmixiu-reactive.workspace = true
 anmixiu-macros = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-anmixiu-platform-macos.workspace = true
+anmixiu-platform.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-anmixiu-platform-windows.workspace = true
+anmixiu-platform.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

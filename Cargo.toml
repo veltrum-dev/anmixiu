@@ -5,15 +5,10 @@ members = [
     "crates/core",
     "crates/reactive",
     "crates/scene",
-    "crates/layout-taffy",
     "crates/runtime",
-    "crates/platform-native",
-    "crates/render-metal",
-    "crates/render-d3d11",
-    "crates/text-coretext",
-    "crates/text-directwrite",
-    "crates/platform-macos",
-    "crates/platform-windows",
+    "crates/platform",
+    "crates/render",
+    "crates/text",
     "crates/macros",
 ]
 
@@ -30,33 +25,23 @@ anmixiu = { path = "crates/anmixiu", version = "0.1.0" }
 anmixiu-core = { path = "crates/core", version = "0.1.0" }
 anmixiu-reactive = { path = "crates/reactive", version = "0.1.0" }
 anmixiu-scene = { path = "crates/scene", version = "0.1.0" }
-anmixiu-layout-taffy = { path = "crates/layout-taffy", version = "0.1.0" }
 anmixiu-runtime = { path = "crates/runtime", version = "0.1.0" }
-anmixiu-platform-native = { path = "crates/platform-native", version = "0.1.0" }
-anmixiu-render-metal = { path = "crates/render-metal", version = "0.1.0" }
-anmixiu-render-d3d11 = { path = "crates/render-d3d11", version = "0.1.0" }
-anmixiu-text-coretext = { path = "crates/text-coretext", version = "0.1.0" }
-anmixiu-text-directwrite = { path = "crates/text-directwrite", version = "0.1.0" }
-anmixiu-platform-macos = { path = "crates/platform-macos", version = "0.1.0" }
-anmixiu-platform-windows = { path = "crates/platform-windows", version = "0.1.0" }
+anmixiu-platform = { path = "crates/platform", version = "0.1.0" }
+anmixiu-render = { path = "crates/render", version = "0.1.0" }
+anmixiu-text = { path = "crates/text", version = "0.1.0" }
 anmixiu-macros = { path = "crates/macros", version = "0.1.0" }
 async-task = "4.7.1"
-bitflags = "2.9.4"
+bytemuck = { version = "1.24.0", features = ["derive"] }
 core-graphics = "0.25.0"
 core-foundation = "0.10.1"
 core-text = "22.0.0"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support", "plotters"] }
-metal = "0.33.0"
-objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false }
-objc2-foundation = { version = "0.3.2", default-features = false }
-objc2-quartz-core = { version = "0.3.2", default-features = false }
-parking_lot = "0.12.4"
+pollster = "0.4.0"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 smol_str = "0.3.6"
 stats_alloc = "0.1.10"
-taffy = { version = "0.9.1", default-features = false, features = ["std", "flexbox"] }
+taffy = { version = "0.9.1", default-features = false, features = ["std", "flexbox", "taffy_tree"] }
 thiserror = "2.0.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["fmt", "ansi"] }
@@ -64,7 +49,8 @@ tokio = { version = "1.47.1", default-features = false, features = ["rt-multi-th
 syn = { version = "2.0.119", features = ["derive", "parsing"] }
 windows = { version = "0.62.2", default-features = false, features = ["std"] }
 windows-core = "0.62.2"
-windows-numerics = "0.3.1"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -76,9 +62,3 @@ pedantic = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-# metal-rs still depends on block 0.1.6, whose extern static uses an uninhabited type. This pinned
-# fork is that release plus the rustc future-incompatibility fix only; remove it after migrating the
-# Metal backend to objc2-metal.
-[patch.crates-io]
-block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "b39ae859d1ee8e8cb5eef6a516471f1578d26b96" }

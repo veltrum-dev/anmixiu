@@ -1,0 +1,27 @@
+[package]
+name = "anmixiu-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anmixiu-scene.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+wgpu = { workspace = true, features = ["gles", "vulkan"] }
+
+[lints]
+workspace = true
