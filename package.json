@@ -1,0 +1,16 @@
+{
+  "name": "anmixiu-docs",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "docs:locales": "bun scripts/check-doc-locales.ts",
+    "docs:theme": "bun scripts/check-doc-theme.ts",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

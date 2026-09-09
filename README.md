@@ -5,11 +5,14 @@
 
 Anmixiu is an experimental cross-platform native GUI runtime written in Rust. Its portable core
 uses ordinary chainable Rust values, fine-grained `Signal` dependency tracking, frame-batched
-updates, and Taffy Flexbox layout. The current MVP ships native macOS and Windows backends: macOS
-uses AppKit, CoreText, and Metal, while Windows uses Win32, DirectWrite, Direct2D, and a D3D11/DXGI
-swap chain. These are platform adapters rather than the product boundary. The longer-term platform
-vision includes Linux, FreeBSD, iOS, and Android behind the same platform-neutral contracts. It
-does not use a WebView, winit, GPUI, JSX, or RSX.
+updates, and Taffy Flexbox layout. The current implementation uses winit for native macOS and
+Windows windows, input, DPI, and presentation events, and wgpu for Metal on macOS and D3D12 on
+Windows. CoreText and DirectWrite continue to supply native text shaping and rasterization. These
+are platform adapters rather than the product boundary. The longer-term platform vision includes
+Linux, FreeBSD, iOS, and Android behind the same platform-neutral contracts. Rendering remains
+native and does not use a browser runtime.
+
+The Windows backend targets Windows 10 or later and does not retain a D3D11 compatibility path.
 
 ## Development status
 
@@ -19,12 +22,28 @@ does not use a WebView, winit, GPUI, JSX, or RSX.
 > project reaches a stable release. Pin a specific version or commit for reproducible builds, and
 > expect to update application code when upgrading.
 
+## Documentation
+
+The documentation site is available in [English](https://veltrum-dev.github.io/anmixiu/) and
+[Simplified Chinese](https://veltrum-dev.github.io/anmixiu/zh/). It is built with VitePress and
+managed with Bun.
+
+Preview it locally with:
+
+```sh
+bun install --frozen-lockfile
+bun run docs:dev
+```
+
+Every documentation page has a matching English and Chinese source. Run `bun run docs:locales`
+before submitting a documentation change to verify locale parity.
+
 ## Cross-platform platform vision
 
 Anmixiu is designed for one Rust UI model that can target desktop and mobile platforms. Shared
 elements, layout, state, scheduling, and scene contracts stay platform-neutral, while each target
 provides its own native window, input, text, and renderer integration. macOS and Windows are the
-implemented MVP backends in this repository. Linux and FreeBSD are planned desktop backends; iOS
+implemented backends in this repository. Linux and FreeBSD are planned desktop backends; iOS
 and Android are planned mobile backends that will reuse the same core contracts rather than fork
 the public UI model. Platform-specific capabilities will remain explicit and target-gated as each
 backend lands.
@@ -152,7 +171,7 @@ Built-in controls are usable by default. A button already has a visible neutral 
 readable label, intrinsic content width, centered text, one-pixel border, hover feedback, pointer
 cursor, focus-ring styling, padding, rounded corners, and a minimum hit-target height; apply
 `Styled` or `InteractiveElement::hover` only to override that baseline. Keyboard traversal and
-activation remain outside the current MVP input scope.
+activation remain outside the current input scope.
 
 Future reusable controls will be registered through an application-owned typed registry and will
 still compose ordinary Rust elements. Anmixiu will not use a global string-tag namespace or a
@@ -272,7 +291,7 @@ cargo run --example multi_window
 ```
 
 `ScrollHandle` supports both `offset_x` and `offset_y`. A scroll container accumulates trackpad
-deltas into a target and follows it on the display link. The handle publishes viewport and content
+deltas into a target and follows it on native redraw events. The handle publishes viewport and content
 metrics so applications can compose their own scrollbar; the framework does not paint one.
 
 For a browser-side baseline, open [browser-reference/index.html](browser-reference/index.html). It

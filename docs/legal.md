@@ -56,7 +56,7 @@ the same as obtaining permission to ship the font file.
 
 ## Accessibility and regulated products
 
-The current MVP does not provide an accessibility tree or assistive-technology integration. A
+The current implementation does not provide an accessibility tree or assistive-technology integration. A
 downstream application should not represent itself as accessible merely because it uses Anmixiu.
 Products and services subject to accessibility law, public-sector procurement rules, medical or
 safety regulation, financial regulation, or similar requirements need a product-specific review

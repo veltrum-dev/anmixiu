@@ -5,23 +5,20 @@
 `anmixiu` is the thin public facade. `anmixiu-core` owns elements, components, public `Style`,
 events, state lookup, lifecycle, and scheduling contracts. `anmixiu-reactive` and
 `anmixiu-scene` are platform-neutral leaves. `anmixiu-runtime` adds Tokio and owner-bound local UI
-future scheduling. `anmixiu-layout-taffy` is an internal adapter from a projection of core styles
-to Taffy Flexbox. `anmixiu-platform-native` owns the shared element-to-layout/scene projection and
-portable input/display models, selecting the native text implementation at compile time.
-`anmixiu-render-metal`/`anmixiu-text-coretext` and
-`anmixiu-render-d3d11`/`anmixiu-text-directwrite` consume platform-neutral scene and geometry data.
-`anmixiu-platform-macos` assembles AppKit while `anmixiu-platform-windows` assembles Win32. Future
-desktop and mobile backends, including iOS and Android, will plug into the same contracts with
-target-specific windowing, input, text, and rendering implementations.
+future scheduling. `anmixiu-platform` owns the internal Taffy adapter, shared
+element-to-layout/scene projection, portable input/display models, winit event loop, and the
+connection between each native window and its wgpu surface. `anmixiu-render` consumes
+platform-neutral Scene data through wgpu, which selects Metal on macOS and D3D12 on Windows.
+`anmixiu-text` selects CoreText or DirectWrite at compile time. Future desktop and mobile backends
+plug into the same contracts without changing the public UI model.
 
 Dependencies always point from platform implementations toward contracts. Core crates never know
-about AppKit, Win32, Metal, D3D11, CoreText, DirectWrite, or a concrete event loop. Taffy types are
+about winit, wgpu, Metal, D3D12, CoreText, DirectWrite, or a concrete event loop. Taffy types are
 not part of the public element or style API.
 
-Native FFI remains confined to the six implementation crates: `anmixiu-platform-macos`,
-`anmixiu-render-metal`, `anmixiu-text-coretext`, `anmixiu-platform-windows`,
-`anmixiu-render-d3d11`, and `anmixiu-text-directwrite`. Every shared contract and the facade forbid
-unsafe Rust.
+`anmixiu-platform` and `anmixiu-render` forbid unsafe Rust and rely on their upstream window and
+surface implementations. Native text FFI is confined to the target-specific modules in
+`anmixiu-text`. Shared contracts and the facade forbid unsafe Rust.
 
 ## Update pipeline
 
@@ -56,9 +53,9 @@ final `Closed` snapshot. The native application loop exits only when the final w
 
 All windows share the application's single Tokio runtime, application state, and typed event
 router. Each window separately owns its root host, reactive owner registry, window state, frame
-builder, renderer, viewport, pointer state, and native display scheduling. macOS routes each
-`NSView` display link through its immutable `WindowId`; Windows routes each HWND and its frame timer
-through the same identity. `Context::window()` is therefore owner-bound and stable, while
+builder, wgpu surface state, viewport, and pointer state. winit routes every native event and
+coalesced `RedrawRequested` through its native window id, which maps to Anmixiu's immutable
+`WindowId`. `Context::window()` is therefore owner-bound and stable, while
 `AppHandle::active_window()` is the changing native-focus view.
 
 ## Element identity
@@ -97,10 +94,9 @@ metrics, and `ButtonElement` supplies a visible neutral background, white label,
 36-pixel minimum height, padding, one-pixel border, hover refinement, an 8-pixel radius, intrinsic
 cross-axis sizing, centered label placement, pointer cursor, and a two-pixel focus ring.
 Borders are paint-only inset layers; hover refinements can change background, foreground, and
-border color without invalidating Taffy layout. AppKit tracking areas and Win32 mouse-leave tracking
-clear hover when the pointer exits the native view. `Styled` overrides remain authoritative; brand
-variants and themes belong to a future
-component layer.
+border color without invalidating Taffy layout. winit cursor-enter/leave events clear hover when the
+pointer exits a native window. `Styled` overrides remain authoritative; brand variants and themes
+belong to a future component layer.
 
 Application and window typography are optional, field-wise defaults. A window font family or size
 overrides the matching application field while leaving the other field free to fall back. When
@@ -166,10 +162,10 @@ registry.
 ## Async boundary
 
 Each application owns one Tokio multithread runtime for timers and I/O readiness. UI futures use a
-bounded `async-task` queue and are polled only by the active platform's native UI thread: AppKit's
-main thread on macOS and the HWND-owning thread on Windows. Future backends provide an equivalent
-native UI executor without changing the owner contract. `Context::spawn` binds a future to the
-current mounted Element owner and returns a structured `SpawnError`, so callers do not retain
+bounded `async-task` queue and are polled only by the thread running winit's native event loop.
+Future backends provide an equivalent native UI executor without changing the owner contract.
+`Context::spawn` binds a future to the current mounted Element owner and returns a structured
+`SpawnError`, so callers do not retain
 or detach a task handle and capacity/lifecycle rejection never becomes a framework panic. The Tokio
 runtime uses two workers: enough to remain multithreaded when one I/O task is delayed, without
 scaling idle UI thread count to every logical CPU. Lifecycle methods and render remain synchronous.
@@ -184,8 +180,9 @@ scaling idle UI thread count to every logical CPU. Lifecycle methods and render 
   frame that observes a repack is rebuilt from a single atlas generation; a frame whose glyph union
   cannot stabilize within the bounded page returns a structured error instead of submitting stale
   UVs.
-- Renderer resources: Metal retains bounded pipelines, atlas textures, and staging buffers; D3D11
-  retains a hard-capacity LRU of Direct2D A8 atlas bitmaps keyed by atlas id and generation.
+- Renderer resources: wgpu retains pipeline sets plus a hard-capacity glyph-atlas LRU keyed by
+  atlas id and generation. Compositor textures are replaced on physical size/format/depth changes
+  and have a 256 MiB hard budget.
 
 ## Backdrop effects and compositing
 
@@ -197,56 +194,23 @@ or non-finite style values emit no effect, and platform renderers clamp larger f
 to the shared 64-logical-pixel ceiling.
 
 An effect command selects the compositor path. A Scene without effects keeps the existing direct
-surface render pass and creates no intermediate color textures. Metal effect frames render into a
-shader-readable scene texture, extract only the effect bounds plus the three-sigma sampling margin,
-run separable horizontal and vertical Gaussian passes, replace the rounded and ancestor-clipped
-backdrop region, then composite the completed scene into the framebuffer-only drawable. Large
-kernels are downsampled until the working sigma is at most eight physical pixels. Paired Gaussian
-weights use linear texture filtering to halve taps without changing the intended kernel.
-
-Metal retains three compositor slots so the UI thread never waits for GPU completion before reusing
-a writable render target. A slot records its last command buffer and becomes reusable only after
-Metal reports completion or failure. Across those slots, scene and blur textures have a 256 MiB hard
-budget and each Scene has a 64-effect hard limit. Each slot retains one scene texture and one blur
-texture pair sized for that frame's largest expanded effect region; ordered effects reuse the pair
-sequentially within the command buffer. Physical size or pixel-format mismatches replace the
-resource. `RenderStats` reports compositor frames, blur operations, and retained texture bytes.
-
-Direct2D follows the same ordered semantics. It uses a target bitmap without
-`D2D1_BITMAP_OPTIONS_CANNOT_DRAW`, ends drawing before binding that bitmap as the built-in Gaussian
-effect input, filters the expanded local region into a reusable scratch bitmap, clips and copies it
-back, and finally copies the completed scene to the swap-chain target. Surface or DPI changes release
-both intermediate bitmaps. The scene and scratch bitmap pair has the same 256 MiB budget and
-64-effect limit. Direct2D owns GPU hazard scheduling for these device-context resources; the UI
-thread never maps them or waits for completion.
+surface render pass and creates no intermediate color textures. The active wgpu renderer uses a
+bounded scene texture, one reusable blur pair, and one transparent texture per nested filter layer.
+It preserves Scene order, clips replacement/composite passes, caps each effect kind at 64, caps
+filter nesting at eight, and rejects plans above 256 MiB before allocating GPU textures.
 
 ## Native scale and refresh
 
-macOS frame requests are coalesced onto the `NSView` display link rather than drawn immediately by
-the main dispatch queue. The link follows the window's current display, so the built-in 120 Hz
-Retina panel and a 60 Hz external panel drive different tick rates without submitting more than one
-ordinary frame per tick. Every tick asks `NSView::convertSizeToBacking` for the native backing size
-rather than assuming `logical_size * backingScaleFactor`; logical layout size, DPR, and exact
-physical surface size are tracked separately. The view opts into inherited layer `contentsScale`
-and redraw-during-resize behavior.
-
-`MetalRenderer` remembers the configured physical surface size. A drawable left over from the old
-display pool is returned as `SurfaceOutOfDate` and never submitted with a new-scale Scene; the next
-display tick retries after `CAMetalLayer` catches up.
-Live resize stores the newest logical/backing viewport and applies `drawableSize` once at the draw
-boundary, rather than mutating the layer for every `setFrameSize:` callback. Layer presentation is
-transaction-coordinated and waits only until the command buffer is scheduled, so Core Animation does
-not stretch an older drawable while the next frame is being queued and the AppKit thread does not
-wait for GPU completion.
-The first frame is also attempted synchronously after the view and layer are attached, because a
-display-link callback may not have entered the active run-loop mode yet. A transient unavailable
-drawable gets one follow-up display turn; repeated misses do not spin and remain recoverable on the
-next resize or external wake.
+winit reports client size in exact physical pixels and reports scale changes separately. Anmixiu
+derives one logical viewport from those two values, reconfigures the wgpu surface to the same
+physical dimensions, and renders only from `RedrawRequested`. `Occluded` suppresses minimized or
+hidden-window work. Surface timeout/occlusion skips a frame, an outdated surface is reconfigured,
+and a lost surface is recreated. No Anmixiu code owns a `CAMetalLayer` or DXGI swap chain.
 
 Text placement uses a position-aware native glyph cache. Layout completes before rasterization; the
 final glyph position at the active DPR selects one of four horizontal subpixel mask variants.
 Geometry uses a physical-pixel `floor(x)` / `round(y)` origin while the chosen mask preserves the
-fractional CoreText advance, so Metal samples atlas texels one-to-one without destroying kerning.
+fractional native advance, so wgpu samples atlas texels one-to-one without destroying kerning.
 Vertical placement rounds the shared line baseline before applying each glyph's integer bearing;
 individual glyph tops are never rounded independently, so mixed scripts and fallback fonts remain
 on one baseline.
@@ -255,26 +219,12 @@ backend extracts a renderer-independent A8 mask. Glyph UVs/quads retain a transp
 two-pixel safety border so low-DPI coverage is not cropped. Scale and final positioned origin are
 part of the bounded text/atlas cache contracts.
 
-Windows opts into Per-Monitor-V2 DPI awareness before creating its HWND. Client rectangles remain
-integer physical pixels, while `GetDpiForWindow` derives the logical viewport used by layout and
-input. `WM_DPICHANGED` applies the system-suggested outer rectangle, and every size/scale transition
-unbinds the old Direct2D target before resizing the DXGI buffers and rebuilding the exact-size
-target. Stale physical size or scale is reported as `SurfaceOutOfDate` instead of presenting a
-scene against mismatched coordinates.
-
-Windows UI-runtime wakes use thread messages whose lifetime is independent of any individual HWND.
-Per-window frame requests are deduplicated through private window messages and a single armed frame
-timer. Element invalidations, hover changes, scroll animation, resize, and paint exposure all
-converge on that path. Pointer coordinates are converted from physical client pixels to logical
-pixels; button capture preserves down/up delivery, and wheel messages preserve signed coordinates
-on monitors with negative desktop origins.
-
 DirectWrite shapes complete text layouts so script fallback, bidirectional ordering, and glyph
 advances are supplied by the native engine. Per-run font-file identity, face index, simulation,
 em size, scale, glyph id, and quantized X/Y subpixel phase form the bounded atlas key. DirectWrite
 produces ClearType coverage, which the backend reduces to a renderer-independent A8 mask with a
-transparent two-pixel border. Direct2D uploads that page as `DXGI_FORMAT_A8_UNORM` with a supported
-premultiplied alpha mode and draws it only as an opacity mask.
+transparent two-pixel border. The renderer uploads that page as an R8 texture and samples it only as
+an opacity mask.
 
 ## Future platforms
 

@@ -3,7 +3,7 @@
 The engineering reference budget is 8.33 ms for a 120 Hz display and 16.67 ms from ordinary input
 to its next visible frame. These are environment-dependent targets, not API guarantees.
 
-The measurements below describe the current macOS MVP backend and its Apple Silicon test
+The measurements below describe the current macOS backend and its Apple Silicon test
 environment. They are a backend baseline, not a claim that Anmixiu is macOS-only; cross-platform
 benchmarks will be added as the Windows, Linux/FreeBSD, iOS, and Android backends land.
 
@@ -26,7 +26,7 @@ must be captured with an allocator profiler when comparing an algorithm change; 
 alone is not allocation evidence. Cache stats and hard capacities are asserted in tests so a warm
 steady-state workload cannot grow bookkeeping without bound.
 
-## MVP release baseline
+## Current release baseline
 
 Recorded on 2026-08-26 on an Apple M1 Pro (arm64, 16 GiB), macOS 26.5.1, Rust 1.98.0,
 using the final workspace and `cargo bench --workspace`:
