@@ -20,7 +20,7 @@ Allocation probes over 1,000 iterations:
 
 `SharedString` wraps `SmolStr`: static values borrow without copying, values up to 23 bytes are
 stored inline, and long values share heap storage. The component host retains each rendered tree in
-an `Rc<ElementNode>` because MVP UI state is main-thread-only; platform projection clones this handle
+an `Rc<ElementNode>` because UI state is currently main-thread-only; platform projection clones this handle
 instead of the full tree. Reproduce with:
 
 ```sh

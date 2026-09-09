@@ -189,10 +189,6 @@ fn main() -> Result<(), anmixiu::AppError> {
         .with_state(AppState {
             username: SharedString::new_static("Anmixiu 用户"),
         })
-        .window(
-            Window::new()
-                .title("Anmixiu Counter MVP")
-                .size(620.0, 520.0),
-        )
+        .window(Window::new().title("Anmixiu Counter").size(620.0, 520.0))
         .run(Counter::default())
 }

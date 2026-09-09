@@ -6,7 +6,7 @@ with `.rules`.
 
 ## Product and public API
 
-- Anmixiu is a native, pure-Rust GUI workspace. The public surface uses ordinary Rust values and chainable builders (`div().height(px(40.)).child(text("Hello"))`); do not add JSX, RSX, tag macros, WebView, GPUI, or winit.
+- Anmixiu is a native, pure-Rust GUI workspace. The public surface uses ordinary Rust values and chainable builders (`div().height(px(40.)).child(text("Hello"))`); keep UI definition in typed Rust builders, and keep windowing and rendering native rather than browser-backed or delegated to a parallel application framework.
 - `anmixiu::Context` is the element context name. Public `Lifecycle::render` receives `&self`; state mutation goes through `Signal`, and lifecycle callbacks are synchronous. `on_mount` runs once after the first successful paint and `on_unmount` once in reverse tree order.
 - Every public UI value implements `Element: Styled + Lifecycle`. Built-ins return concrete `DivElement`, `TextElement`, and `ButtonElement` primitive fast paths; custom Elements retain independent mounted identities and reactive owners when used as children. Heterogeneous storage uses the doc-hidden `ElementNode` projection only across internal crate boundaries.
 - Public `ElementId` is a caller-provided semantic identity. `.id(...)` upgrades a concrete element to `Stateful<E>` and unlocks stateful interaction APIs such as `.on_click(...)`; dense layout/paint node indices remain internal implementation details.
@@ -24,8 +24,7 @@ with `.rules`.
 
 - `anmixiu` is a thin facade.
 - Platform-neutral leaves: `anmixiu-reactive`, `anmixiu-scene`.
-- `anmixiu-runtime` depends on reactive owner contracts; `anmixiu-core` depends on reactive, scene, and runtime contracts; `anmixiu-layout-taffy` adapts core styles; platform renderers consume scene commands.
-- `anmixiu-platform-native` owns the shared element-to-layout/scene projection and portable input/display models. `anmixiu-platform-macos` assembles AppKit + Metal + CoreText; `anmixiu-platform-windows` assembles Win32 + D3D11 + DirectWrite. Core crates never depend back on platform implementations.
+- `anmixiu-runtime` depends on reactive owner contracts; `anmixiu-core` depends on reactive, scene, and runtime contracts. `anmixiu-platform` owns the internal Taffy adapter, element-to-layout/scene projection, portable input/display models, and winit window integration. `anmixiu-render` consumes scene commands through wgpu. `anmixiu-text` owns target-specific CoreText/DirectWrite integration. Core crates never depend back on platform implementations.
 - Third-party versions and internal paths belong in root `[workspace.dependencies]`; member crates inherit them. OS implementations use target-specific dependencies, never OS-selection features.
 - Do not add empty Linux/FreeBSD/iOS/Android crates. Future desktop direction: Linux/FreeBSD compile Wayland and X11 together with runtime selection, preferring Vulkan and falling back to GL. The longer-term mobile direction includes native iOS and Android backends that reuse the platform-neutral contracts; add those crates only with a real implementation.
 
@@ -59,12 +58,12 @@ with `.rules`.
 - The UI thread must never wait for GPU completion. Any CPU-writable buffer visible to an in-flight
   command buffer needs an explicit ring/pool and completion-based reuse before asynchronous
   submission is introduced. Validate both composited and direct presentation modes where possible.
-- macOS frame delivery follows the active `NSView` display link. Before every tick synchronize bounds/backing scale; never submit a drawable whose physical size differs from the configured surface. Glyph quads must align to the active physical pixel grid across 1x/2x scale transitions and retain a verified transparent atlas safety border for antialias coverage.
+- Frame delivery follows winit `RedrawRequested` events. Configure wgpu surfaces from the exact physical `Resized` dimensions and the current scale factor; never submit a frame whose physical size differs from the configured surface. Glyph quads must align to the active physical pixel grid across 1x/2x scale transitions and retain a verified transparent atlas safety border for antialias coverage.
 
 ## Safety and scope
 
-- `unsafe`/FFI is allowed only in `platform-macos`, `render-metal`, `text-coretext`, `platform-windows`, `render-d3d11`, and `text-directwrite`; every unsafe block or impl must have an adjacent `// SAFETY:` explanation. Core, reactive, scene, layout, runtime, shared platform projection, facade, and examples forbid unsafe.
+- `unsafe`/FFI is allowed only in `anmixiu-text`; every unsafe block or impl must have an adjacent `// SAFETY:` explanation. Core, reactive, scene, runtime, platform, render, facade, macros, and examples forbid unsafe.
 - Prefer structured errors for recoverable failures. Keep responsibilities narrow and compose concrete types before inventing traits or compatibility layers.
 - Keep source files responsibility-focused. A module with submodules uses `module.rs` plus a sibling `module/` directory (for example `element.rs` with `element/style.rs` and `element/div.rs`); do not use `mod.rs`. Split by stable responsibility, not arbitrary line counts.
-- Out of current MVP scope: backends other than macOS and Windows, web, async lifecycle/render, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown. This is an MVP boundary rather than the product boundary; the longer-term roadmap includes Linux/FreeBSD plus native iOS and Android backends.
+- Not currently implemented: backends other than macOS and Windows, web, async lifecycle/render, Grid/full Block, IME/input, clipboard, accessibility, images, scrolling, full themes/component libraries/Tailwind, arbitrary subtree State, and application-wide async shutdown. This is the current implementation boundary rather than the product boundary; the longer-term roadmap includes Linux/FreeBSD plus native iOS and Android backends.
 - Preserve user changes. Work directly on `main`; do not create worktrees, branches, or commits unless the user explicitly asks later.

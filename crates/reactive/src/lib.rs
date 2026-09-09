@@ -180,7 +180,7 @@ impl Drop for OwnerCleanup {
 /// Owns component identities, dependency edges, and the dirty queue.
 ///
 /// This type is intentionally `!Send`: UI signals and their owners stay on the
-/// application main thread in the MVP.
+/// application main thread in the current UI model.
 #[derive(Clone)]
 pub struct OwnerRegistry {
     inner: Rc<RegistryInner>,
@@ -475,7 +475,7 @@ impl<T> SourceSubscription for SignalInner<T> {
 /// A shared, main-thread reactive value.
 ///
 /// Cloning a signal only clones an `Rc` handle. A signal is intentionally
-/// `!Send`/`!Sync` in the MVP, avoiding locks in render and input hot paths.
+/// `!Send`/`!Sync` in the current UI model, avoiding locks in render and input hot paths.
 pub struct Signal<T> {
     inner: Rc<SignalInner<T>>,
 }
