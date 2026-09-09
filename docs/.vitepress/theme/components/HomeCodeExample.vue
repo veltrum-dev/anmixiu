@@ -76,11 +76,25 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .home-code-example {
+  --home-code-bg: var(--vp-code-block-bg);
+  --home-code-header-bg: var(--vp-c-bg-elv);
+  --home-code-border: var(--vp-c-border);
+  --home-code-text: var(--vp-code-block-color);
+  --home-code-muted: var(--vp-c-text-3);
+  --home-code-button-bg: var(--vp-code-copy-code-bg);
+  --home-code-button-border: var(--vp-code-copy-code-border-color);
+  --home-code-button-hover-border: var(--vp-code-copy-code-hover-border-color);
+  --home-code-button-hover-text: var(--vp-c-text-1);
+  --home-code-keyword: var(--vp-c-brand-1);
+  --home-code-function: var(--vp-c-brand-2);
+  --home-code-macro: var(--vp-c-tip-1);
+  --home-code-string: var(--vp-c-success-1);
+  --home-code-number: var(--vp-c-warning-1);
   width: min(100%, 520px);
-  border: 1px solid #2b2d35;
+  border: 1px solid var(--home-code-border);
   border-radius: 14px;
-  background: #0e0f13;
-  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.32);
+  background: var(--home-code-bg);
+  box-shadow: var(--vp-shadow-4);
   overflow: hidden;
 }
 
@@ -90,9 +104,9 @@ onBeforeUnmount(() => {
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   padding: 0 12px;
-  border-bottom: 1px solid #2b2d35;
-  background: #191a20;
-  color: #8b909b;
+  border-bottom: 1px solid var(--home-code-border);
+  background: var(--home-code-header-bg);
+  color: var(--home-code-muted);
   font-family: var(--vp-font-family-mono);
   font-size: 12px;
 }
@@ -130,17 +144,17 @@ button {
   min-height: 30px;
   justify-self: end;
   padding: 0 9px;
-  border: 1px solid #343640;
+  border: 1px solid var(--home-code-button-border);
   border-radius: 6px;
-  background: #22232a;
-  color: #d7dae0;
+  background: var(--home-code-button-bg);
+  color: var(--vp-c-text-2);
   font-size: 11px;
   font-weight: 600;
 }
 
 button:hover {
-  border-color: #5f6370;
-  color: #ffffff;
+  border-color: var(--home-code-button-hover-border);
+  color: var(--home-code-button-hover-text);
 }
 
 pre {
@@ -148,8 +162,8 @@ pre {
   margin: 0;
   padding: 18px 20px 20px;
   overflow: auto;
-  background: #0e0f13;
-  color: #abb2bf;
+  background: var(--home-code-bg);
+  color: var(--home-code-text);
   font-family: var(--vp-font-family-mono);
   font-size: 12px;
   line-height: 1.65;
@@ -162,23 +176,23 @@ code {
 }
 
 code :deep(.syntax-keyword) {
-  color: #c678dd;
+  color: var(--home-code-keyword);
 }
 
 code :deep(.syntax-function) {
-  color: #61afef;
+  color: var(--home-code-function);
 }
 
 code :deep(.syntax-macro) {
-  color: #56b6c2;
+  color: var(--home-code-macro);
 }
 
 code :deep(.syntax-string) {
-  color: #98c379;
+  color: var(--home-code-string);
 }
 
 code :deep(.syntax-number) {
-  color: #e5a66b;
+  color: var(--home-code-number);
 }
 
 @media (max-width: 639px) {

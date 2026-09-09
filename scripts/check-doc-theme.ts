@@ -27,10 +27,15 @@ check(example.includes("let count = self.count.get();"), "the hero snippet must 
 check(example.includes("navigator.clipboard.writeText"), "the hero code example must be copyable");
 check(example.includes("home-code-example__traffic"), "the hero example must use a macOS-style title bar");
 check(example.includes('class="syntax-keyword"'), "the Rust example must render syntax-highlighted tokens");
+check(
+  example.includes("var(--vp-code-block-bg)") && example.includes("var(--vp-c-bg-elv)"),
+  "the home code example must use VitePress theme variables for its surfaces",
+);
 check(existsSync(codeWindowsPath), "Markdown code blocks must have the shared macOS window stylesheet");
 const codeWindows = readFileSync(codeWindowsPath, "utf8");
 check(theme.includes('import "./code-windows.css"'), "the code-window stylesheet must be loaded by the theme");
 check(codeWindows.includes(".vp-doc div[class*="), "the code-window style must target fenced Markdown blocks");
-check(codeWindows.includes("var(--shiki-dark"), "light pages must keep readable dark-surface syntax colors");
+check(codeWindows.includes("var(--vp-code-block-bg)"), "fenced code windows must use VitePress code theme variables");
+check(!codeWindows.includes("var(--shiki-dark"), "fenced code windows must not force dark syntax colors in light mode");
 
 console.log("VitePress default theme contract passed.");

@@ -1,23 +1,11 @@
 /* Keep VitePress structure and Shiki output; only frame fenced code as a macOS window. */
 .vp-doc div[class*="language-"] {
-  --vp-code-block-bg: #0e0f13;
-  --vp-code-block-color: #abb2bf;
-  --vp-code-block-divider-color: #2b2d35;
-  --vp-code-lang-color: #8b909b;
-  --vp-code-copy-code-border-color: #343640;
-  --vp-code-copy-code-bg: #22232a;
-  --vp-code-copy-code-hover-border-color: #5f6370;
-  --vp-code-copy-code-hover-bg: #292b33;
-  --vp-code-copy-code-active-text: #f3f4f6;
-  --vp-code-line-highlight-color: rgba(255, 255, 255, 0.07);
-  --vp-code-line-number-color: #666b76;
-
   position: relative;
   margin: 20px -24px;
   padding-top: 44px;
-  border: 1px solid #2b2d35;
-  background: linear-gradient(#191a20 0 44px, #0e0f13 44px);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--vp-c-border);
+  background: linear-gradient(var(--vp-c-bg-elv) 0 44px, var(--vp-code-block-bg) 44px);
+  box-shadow: var(--vp-shadow-3);
   overflow: hidden;
 }
 
@@ -41,16 +29,16 @@
   left: 0;
   z-index: 2;
   height: 1px;
-  background: #2b2d35;
+  background: var(--vp-code-block-divider-color);
   content: "";
 }
 
 .vp-doc div[class*="language-"] pre {
-  background: #0e0f13;
+  background: var(--vp-code-block-bg);
 }
 
 .vp-doc div[class*="language-"] code {
-  color: #abb2bf;
+  color: var(--vp-code-block-color);
 }
 
 .vp-doc div[class*="language-"] > span.lang {
@@ -102,10 +90,6 @@
 
 .vp-doc div[class*="language-"] .line-numbers-wrapper {
   top: 44px;
-}
-
-html:not(.dark) .vp-doc .vp-code span {
-  color: var(--shiki-dark, inherit);
 }
 
 @media (min-width: 640px) {
